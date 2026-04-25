@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -14,19 +15,24 @@ No explanation, no markdown, no code blocks. Raw JSON only.
 
 Speech scenario: {scenario}
 Transcript: {transcript}
+Number of adversarial questions to generate: {question_count}
 
 Return exactly this structure:
 {{
   "claims": ["main claim 1", "main claim 2", "main claim 3"],
   "weakest_claim": "the specific claim with least evidence",
   "gap_explanation": "one sentence on why this claim is weak",
-  "adversarial_question": "challenging question targeting the weakest claim, under 35 words, referencing specific content from the transcript"
+  "adversarial_questions": [
+    "challenging question 1 targeting the weakest claim, under 35 words, referencing specific content from the transcript"
+  ]
 }}
 
 Rules:
 - Only include claims the speaker actually made
-- The question must be specific to what was said, not generic
-- If transcript has fewer than 80 words, return {{"claims": [], "weakest_claim": "", "gap_explanation": "", "adversarial_question": ""}}
+- Each question must be specific to what was said, not generic
+- Make the questions distinct from each other and escalate pressure slightly
+- Return exactly {question_count} questions when the transcript is long enough
+- If transcript has fewer than 80 words, return {{"claims": [], "weakest_claim": "", "gap_explanation": "", "adversarial_questions": []}}
 - For investor_pitch scenario: focus on business model and market assumptions
 - For job_interview scenario: focus on skill claims and experience assertions
 - For classroom scenario: focus on conceptual understanding gaps
@@ -49,6 +55,8 @@ If the answer was satisfactory or addressed the gap:
 {{"should_followup": false, "followup_question": ""}}
 """.strip()
 
+ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
+
 
 def _parse_json_payload(raw: str | None) -> dict | None:
     if not raw:
@@ -61,50 +69,107 @@ def _parse_json_payload(raw: str | None) -> dict | None:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        logger.warning("Failed to parse Ollama JSON payload")
+        logger.warning("Failed to parse Gemini JSON payload")
         return None
 
 
-async def call_ollama(prompt: str, timeout_seconds: int = 8) -> str | None:
-    ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-    model = os.getenv("GEMMA_MODEL", "gemma3")
+async def call_gemini(
+    prompt: str,
+    timeout_seconds: float = 8.0,
+    *,
+    temperature: float = 0.3,
+    max_output_tokens: int = 1024,
+) -> str | None:
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        logger.warning("GEMINI_API_KEY not set")
+        return None
 
-    payload = {"model": model, "prompt": prompt, "stream": False}
+    url = (
+        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"gemini-1.5-flash:generateContent?key={api_key}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": temperature,
+            "maxOutputTokens": max_output_tokens,
+            "responseMimeType": "application/json",
+        },
+    }
 
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            response = await client.post(f"{ollama_host}/api/generate", json=payload)
+            response = await client.post(url, json=payload)
         if response.status_code != 200:
-            logger.warning("Ollama non-200 status: %s", response.status_code)
+            logger.warning("Gemini non-200 status: %s %s", response.status_code, response.text)
             return None
         body = response.json()
-        return body.get("response")
+        candidates = body.get("candidates", [])
+        if not candidates:
+            return None
+        parts = candidates[0].get("content", {}).get("parts", [])
+        if not parts:
+            return None
+        return str(parts[0].get("text", "")).strip() or None
     except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError, ValueError) as exc:
-        logger.warning("Ollama call failed: %s", exc)
+        logger.warning("Gemini call failed: %s", exc)
         return None
 
 
-async def extract_claims_and_question(transcript: str, scenario: str) -> dict | None:
-    prompt = CLAIM_EXTRACTION_PROMPT.format(scenario=scenario, transcript=transcript)
-    raw = await call_ollama(prompt=prompt, timeout_seconds=8)
+def _normalize_question_count(question_count: int) -> int:
+    return max(1, min(10, int(question_count)))
+
+
+def _sanitize_questions(raw_questions: object, question_count: int) -> list[str]:
+    if not isinstance(raw_questions, list):
+        return []
+    cleaned: list[str] = []
+    for item in raw_questions:
+        question = " ".join(str(item or "").split()).strip()
+        if question and question not in cleaned:
+            cleaned.append(question)
+        if len(cleaned) >= question_count:
+            break
+    return cleaned
+
+
+async def extract_claims_and_questions(
+    transcript: str,
+    scenario: str,
+    question_count: int = 1,
+) -> dict | None:
+    normalized_count = _normalize_question_count(question_count)
+    prompt = CLAIM_EXTRACTION_PROMPT.format(
+        scenario=scenario,
+        transcript=transcript,
+        question_count=normalized_count,
+    )
+    raw = await call_gemini(prompt=prompt, timeout_seconds=10.0, max_output_tokens=1400)
     parsed = _parse_json_payload(raw)
     if not parsed:
         return None
 
-    required = {"claims", "weakest_claim", "gap_explanation", "adversarial_question"}
+    required = {"claims", "weakest_claim", "gap_explanation", "adversarial_questions"}
     if not required.issubset(parsed.keys()):
         return None
 
     claims = parsed.get("claims")
     if not isinstance(claims, list):
         return None
+    questions = _sanitize_questions(parsed.get("adversarial_questions"), normalized_count)
 
     return {
         "claims": [str(c).strip() for c in claims if str(c).strip()],
         "weakest_claim": str(parsed.get("weakest_claim", "")).strip(),
         "gap_explanation": str(parsed.get("gap_explanation", "")).strip(),
-        "adversarial_question": str(parsed.get("adversarial_question", "")).strip(),
+        "adversarial_questions": questions,
+        "adversarial_question": questions[0] if questions else "",
     }
+
+
+async def extract_claims_and_question(transcript: str, scenario: str) -> dict | None:
+    return await extract_claims_and_questions(transcript=transcript, scenario=scenario, question_count=1)
 
 
 async def generate_followup_question(
@@ -117,7 +182,7 @@ async def generate_followup_question(
         user_answer=user_answer,
         claims=json.dumps(claims, ensure_ascii=True),
     )
-    raw = await call_ollama(prompt=prompt, timeout_seconds=5)
+    raw = await call_gemini(prompt=prompt, timeout_seconds=6.0, max_output_tokens=300)
     parsed = _parse_json_payload(raw)
     if not parsed:
         return None
@@ -126,3 +191,31 @@ async def generate_followup_question(
         question = str(parsed.get("followup_question", "")).strip()
         return question or None
     return None
+
+
+async def synthesize_question_audio(question: str, api_key: str) -> str | None:
+    text = " ".join((question or "").split()).strip()
+    if not text or not api_key:
+        return None
+
+    payload = {
+        "text": text,
+        "model_id": "eleven_flash_v2_5",
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+    }
+    headers = {
+        "xi-api-key": api_key,
+        "Content-Type": "application/json",
+    }
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}"
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+        if response.status_code != 200:
+            logger.warning("ElevenLabs non-200 for argument question audio: %s", response.status_code)
+            return None
+        return base64.b64encode(response.content).decode("ascii")
+    except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
+        logger.warning("ElevenLabs question audio failed: %s", exc)
+        return None

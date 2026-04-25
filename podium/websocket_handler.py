@@ -10,7 +10,11 @@ from typing import Any
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect
 
-from podium.core.argument import extract_claims_and_question, generate_followup_question
+from podium.core.argument import (
+    extract_claims_and_question,
+    generate_followup_question,
+    synthesize_question_audio,
+)
 from podium.core.audience import calculate_avatar_states, expand_audience
 from podium.core.coach import generate_realtime_tip, generate_session_breakdown, voice_tip
 from podium.core.elevenlabs_stt import transcribe_pcm_s16le_16k_mono
@@ -353,7 +357,9 @@ async def handle_session_end(
 
     question = session.adversarial_question.strip()
     if question:
-        qa_msg = QAQuestionMessage(type="qa_question", question=question, audio_base64=None)
+        elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
+        audio_base64 = await synthesize_question_audio(question, elevenlabs_key)
+        qa_msg = QAQuestionMessage(type="qa_question", question=question, audio_base64=audio_base64)
         await _safe_send_json(websocket, qa_msg.model_dump())
 
         try:
@@ -361,7 +367,12 @@ async def handle_session_end(
             session.user_qa_answer = answer
             followup = await generate_followup_question(question, answer, session.claims)
             if followup:
-                followup_msg = QAQuestionMessage(type="qa_question", question=followup, audio_base64=None)
+                followup_audio = await synthesize_question_audio(followup, elevenlabs_key)
+                followup_msg = QAQuestionMessage(
+                    type="qa_question",
+                    question=followup,
+                    audio_base64=followup_audio,
+                )
                 await _safe_send_json(websocket, followup_msg.model_dump())
         except asyncio.TimeoutError:
             logger.info("QA answer timeout for session %s", session.session_id)

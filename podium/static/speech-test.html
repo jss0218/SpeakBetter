@@ -425,6 +425,40 @@
       gap: 10px;
     }
 
+    .question-panel {
+      margin-top: 14px;
+      padding: 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(148, 163, 184, 0.12);
+      background: rgba(15, 23, 42, 0.72);
+      display: grid;
+      gap: 12px;
+    }
+
+    .question-panel h3 {
+      margin: 0;
+      font-size: 0.95rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: #cbd5e1;
+    }
+
+    .question-text {
+      margin: 0;
+      color: #dbeafe;
+      line-height: 1.55;
+      min-height: 3.1em;
+    }
+
+    .question-meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
     .transcript-actions {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -670,6 +704,17 @@
           Tip: set <span class="mono">ELEVENLABS_API_KEY</span> in <span class="mono">podium/.env</span> to enable speech-to-text (transcripts) and spoken coach tips.
         </div>
 
+        <div class="question-panel">
+          <div>
+            <h3>Argument Question</h3>
+            <p class="question-text" id="questionText">Speak, stop the session, and the backend will send back a voiced adversarial question based on your transcript.</p>
+          </div>
+          <div class="question-meta">
+            <span id="questionAudioState">No question yet</span>
+            <button id="replayQuestionBtn" class="ghost" disabled>Replay question</button>
+          </div>
+        </div>
+
         <div class="transcript-panel">
           <h3>Final Transcript</h3>
           <textarea id="finalTranscript" readonly placeholder="After you stop the session, your transcript will appear here."></textarea>
@@ -728,6 +773,9 @@
     const finalTranscript = el('finalTranscript');
     const copyTranscriptBtn = el('copyTranscriptBtn');
     const clearTranscriptBtn = el('clearTranscriptBtn');
+    const questionText = el('questionText');
+    const questionAudioState = el('questionAudioState');
+    const replayQuestionBtn = el('replayQuestionBtn');
 
     const startBtn = el('startBtn');
     const stopBtn = el('stopBtn');
@@ -751,6 +799,7 @@
       lastEngagement: null,
       demoAngle: 0,
       transcriptParts: [],
+      latestQuestionAudio: '',
     };
 
     function renderFinalTranscript() {
@@ -823,6 +872,21 @@
         audio.onended = () => URL.revokeObjectURL(url);
       } catch (error) {
         append('audio_error', error.message || String(error));
+      }
+    }
+
+    async function playQuestionAudio(base64Audio) {
+      if (!base64Audio) return;
+      try {
+        const buffer = base64ToArrayBuffer(base64Audio);
+        const blob = new Blob([buffer], { type: 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.volume = 1.0;
+        await audio.play();
+        audio.onended = () => URL.revokeObjectURL(url);
+      } catch (error) {
+        append('question_audio_error', error.message || String(error));
       }
     }
 
@@ -1058,7 +1122,11 @@
         setStatus('Requesting camera and microphone...', 'ok');
         setSttState('STT listening...', 'warn');
         state.transcriptParts = [];
+        state.latestQuestionAudio = '';
         renderFinalTranscript();
+        questionText.textContent = 'Speak for a bit, then stop the session to receive a voiced adversarial question.';
+        questionAudioState.textContent = 'Waiting for question';
+        replayQuestionBtn.disabled = true;
         window.setTimeout(markSttErrorIfSilent, 10000);
 
         try {
@@ -1146,6 +1214,23 @@
           if (data.type === 'session_breakdown') {
             setStatus('Session complete.', 'ok');
             renderFinalTranscript();
+          }
+          if (data.type === 'qa_question') {
+            const text = String(data.question || '').trim();
+            if (text) {
+              questionText.textContent = text;
+              setStatus(`Question: ${text}`, 'ok');
+            }
+
+            state.latestQuestionAudio = String(data.audio_base64 || '');
+            if (state.latestQuestionAudio) {
+              questionAudioState.textContent = 'Question audio ready';
+              replayQuestionBtn.disabled = false;
+              playQuestionAudio(state.latestQuestionAudio);
+            } else {
+              questionAudioState.textContent = 'Question text received, no audio returned';
+              replayQuestionBtn.disabled = true;
+            }
           }
         } catch (error) {
           append('raw', event.data);
@@ -1239,6 +1324,10 @@
       state.transcriptParts = [];
       renderFinalTranscript();
       setStatus('Transcript cleared.', 'ok');
+    });
+
+    replayQuestionBtn.addEventListener('click', () => {
+      playQuestionAudio(state.latestQuestionAudio);
     });
 
     append('info', 'Open this page on localhost, click Start session, allow mic + camera, then speak.');
