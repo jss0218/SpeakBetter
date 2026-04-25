@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+websockets
+python-dotenv
+motor
+pymongo
+deepgram-sdk
+uagents
+httpx
+pydantic
+python-multipart
+ollama
+elevenlabs

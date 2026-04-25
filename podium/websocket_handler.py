@@ -1,0 +1,430 @@
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime, timezone
+import json
+import logging
+import os
+from typing import Any
+
+from fastapi import WebSocket
+from starlette.websockets import WebSocketDisconnect
+
+from podium.core.argument import extract_claims_and_question, generate_followup_question
+from podium.core.audience import calculate_avatar_states, expand_audience
+from podium.core.coach import generate_realtime_tip, generate_session_breakdown, voice_tip
+from podium.core.fusion import calculate_engagement, calculate_trend
+from podium.core.pressure import check_pressure_events
+from podium.core.speech import calculate_wpm, count_fillers, normalize_amplitude
+from podium.db.mongo import save_session
+from podium.schemas import (
+    AudienceUpdateMessage,
+    CoachTipMessage,
+    ConnectedMessage,
+    EngagementUpdateMessage,
+    ErrorMessage,
+    PressureEventMessage,
+    QAQuestionMessage,
+    SessionBreakdownMessage,
+    TranscriptMessage,
+    VisionUpdateMessage,
+)
+from podium.session import SessionState
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_pcm16_energy(chunk: bytes) -> float:
+    if not chunk:
+        return 0.0
+    if len(chunk) < 2:
+        return 0.0
+    sample_count = len(chunk) // 2
+    total = 0.0
+    for i in range(0, sample_count * 2, 2):
+        sample = int.from_bytes(chunk[i : i + 2], byteorder="little", signed=True)
+        total += abs(sample) / 32768.0
+    return min(1.0, total / max(1, sample_count))
+
+
+async def _safe_send_json(websocket: WebSocket, payload: dict[str, Any]) -> None:
+    try:
+        await websocket.send_json(payload)
+    except Exception as exc:
+        logger.warning("WebSocket send failed: %s", exc)
+
+
+async def _send_error(websocket: WebSocket, message: str, code: str) -> None:
+    error = ErrorMessage(type="error", message=message, code=code)
+    await _safe_send_json(websocket, error.model_dump())
+
+
+async def handle_deepgram_stream(
+    session: SessionState,
+    websocket: WebSocket,
+    audio_queue: "asyncio.Queue[bytes]",
+    stop_event: asyncio.Event,
+) -> None:
+    deepgram_conn = None
+
+    async def _handle_transcript_text(text: str) -> None:
+        clean = (text or "").strip()
+        if not clean:
+            session.pause_detected = True
+            session.pause_count += 1
+            return
+
+        session.pause_detected = False
+        fillers, _ = count_fillers(clean)
+        projected_word_count = session.word_count + len(clean.split())
+        wpm = calculate_wpm(projected_word_count, session.get_elapsed_seconds())
+        session.add_transcript_chunk(clean, fillers, wpm, session.vocal_energy)
+        payload = TranscriptMessage(
+            type="transcript",
+            text=clean,
+            filler_count=session.filler_count,
+            wpm=session.words_per_minute,
+            pause_detected=session.pause_detected,
+            timestamp=session.get_elapsed_seconds(),
+        )
+        await _safe_send_json(websocket, payload.model_dump())
+
+    try:
+        deepgram_key = os.getenv("DEEPGRAM_API_KEY", "")
+        if deepgram_key:
+            try:
+                import deepgram  # type: ignore
+
+                DeepgramClient = getattr(deepgram, "DeepgramClient", None)
+                LiveTranscriptionEvents = getattr(deepgram, "LiveTranscriptionEvents", None)
+                LiveOptions = getattr(deepgram, "LiveOptions", None)
+                if DeepgramClient and LiveTranscriptionEvents and LiveOptions:
+                    dg = DeepgramClient(deepgram_key)
+                    listen = getattr(dg, "listen", None)
+                    if listen and hasattr(listen, "asynclive"):
+                        deepgram_conn = listen.asynclive.v("1")
+                    elif listen and hasattr(listen, "asyncwebsocket"):
+                        deepgram_conn = listen.asyncwebsocket.v("1")
+
+                    if deepgram_conn is not None:
+                        async def _on_transcript(_, result, **kwargs):
+                            del kwargs
+                            try:
+                                channel = getattr(result, "channel", None)
+                                alternatives = getattr(channel, "alternatives", []) if channel else []
+                                first = alternatives[0] if alternatives else None
+                                transcript = getattr(first, "transcript", "") if first else ""
+                                await _handle_transcript_text(transcript)
+                            except Exception as exc:
+                                logger.warning("Deepgram transcript callback error: %s", exc)
+
+                        deepgram_conn.on(LiveTranscriptionEvents.Transcript, _on_transcript)
+                        options = LiveOptions(
+                            model="nova-2",
+                            language="en-US",
+                            encoding="linear16",
+                            channels=1,
+                            sample_rate=16000,
+                            interim_results=True,
+                            punctuate=True,
+                        )
+                        await deepgram_conn.start(options)
+            except Exception as exc:
+                logger.warning("Deepgram live setup failed; continuing with energy-only mode: %s", exc)
+
+        while not stop_event.is_set():
+            try:
+                chunk = await asyncio.wait_for(audio_queue.get(), timeout=1.0)
+            except asyncio.TimeoutError:
+                continue
+            except Exception as exc:
+                logger.warning("Audio queue read failed: %s", exc)
+                continue
+
+            energy = normalize_amplitude(_extract_pcm16_energy(chunk), session.energy_history)
+            session.vocal_energy = energy
+
+            if deepgram_conn is not None:
+                try:
+                    await deepgram_conn.send(chunk)
+                except Exception as exc:
+                    logger.warning("Deepgram send failed: %s", exc)
+            else:
+                session.pause_detected = False
+    finally:
+        if deepgram_conn is not None:
+            try:
+                await deepgram_conn.finish()
+            except Exception:
+                pass
+
+
+async def handle_vision_update(msg: dict, session: SessionState) -> None:
+    try:
+        parsed = VisionUpdateMessage(**msg)
+    except Exception:
+        return
+    session.update_vision(
+        eye_contact=parsed.eye_contact,
+        face_detected=parsed.face_detected,
+        gesture=parsed.gesture_detected,
+    )
+
+
+async def audience_update(session: SessionState, websocket: WebSocket) -> None:
+    new_states, delays = calculate_avatar_states(
+        engagement_score=session.engagement_score,
+        dominant_signal=session.dominant_signal,
+        current_states=session.avatar_states,
+        stubbornness_factors=session.avatar_stubbornness,
+        audience_size=session.audience_size,
+    )
+    session.avatar_states = new_states
+
+    payload = AudienceUpdateMessage(
+        type="audience_update",
+        avatar_states=new_states,
+        transition_delays_ms=delays,
+    )
+    await _safe_send_json(websocket, payload.model_dump())
+
+
+async def fusion_loop(session: SessionState, websocket: WebSocket, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set() and session.ended_at is None:
+        try:
+            score, dominant_signal, components = calculate_engagement(
+                eye_contact_score=session.eye_contact_score,
+                filler_rate=session.filler_rate,
+                words_per_minute=session.words_per_minute,
+                vocal_energy=session.vocal_energy,
+                pause_count=session.pause_count,
+                elapsed_seconds=session.get_elapsed_seconds(),
+                energy_history=session.energy_history,
+                engagement_history=session.engagement_history,
+            )
+            trend = calculate_trend(session.engagement_history + [{"score": score}])
+            session.update_engagement(score=score, signal=dominant_signal, trend=trend)
+
+            payload = EngagementUpdateMessage(
+                type="engagement_update",
+                score=score,
+                dominant_signal=dominant_signal,
+                trend=trend,
+                component_scores=components,
+            )
+            await _safe_send_json(websocket, payload.model_dump())
+            await audience_update(session, websocket)
+        except Exception as exc:
+            logger.exception("fusion_loop failed: %s", exc)
+
+        await asyncio.sleep(2)
+
+
+async def coach_loop(session: SessionState, websocket: WebSocket, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set() and session.ended_at is None:
+        try:
+            now = session.get_elapsed_seconds()
+            tip = await generate_realtime_tip(
+                recent_transcript=session.get_recent_transcript(30),
+                dominant_signal=session.dominant_signal,
+                coach_tips=session.coach_tips,
+                last_tip_timestamp=session.last_tip_timestamp,
+                current_timestamp=now,
+            )
+            if tip:
+                session.coach_tips.append({"tip": tip, "timestamp": now})
+                session.last_tip_timestamp = now
+                audio_base64 = None
+                elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
+                if elevenlabs_key:
+                    audio_base64 = await voice_tip(tip, elevenlabs_key)
+                payload = CoachTipMessage(type="coach_tip", tip=tip, audio_base64=audio_base64)
+                await _safe_send_json(websocket, payload.model_dump())
+        except Exception as exc:
+            logger.exception("coach_loop failed: %s", exc)
+
+        await asyncio.sleep(30)
+
+
+async def argument_loop(session: SessionState, websocket: WebSocket, stop_event: asyncio.Event) -> None:
+    del websocket
+    while not stop_event.is_set() and session.ended_at is None:
+        try:
+            if session.word_count >= 100:
+                result = await extract_claims_and_question(session.full_transcript, session.scenario)
+                if result:
+                    session.claims = result.get("claims", [])
+                    session.weakest_claim = result.get("weakest_claim", "")
+                    session.gap_explanation = result.get("gap_explanation", "")
+                    session.adversarial_question = result.get("adversarial_question", "")
+        except Exception as exc:
+            logger.exception("argument_loop failed: %s", exc)
+
+        await asyncio.sleep(45)
+
+
+async def pressure_loop(
+    session: SessionState,
+    websocket: WebSocket,
+    stop_event: asyncio.Event,
+    runtime_state: dict[str, Any],
+) -> None:
+    while not stop_event.is_set() and session.ended_at is None:
+        try:
+            events = check_pressure_events(
+                pressure_events_fired=session.pressure_events_fired,
+                high_engagement_streak=session.high_engagement_streak,
+                elapsed_seconds=session.get_elapsed_seconds(),
+                target_duration=session.target_duration,
+                audience_size=session.audience_size,
+                avatar_states=session.avatar_states,
+                last_distraction_time=runtime_state.get("last_distraction_time", 0.0),
+            )
+            for item in events:
+                event_name = item.get("event", "")
+                payload = item.get("payload", {})
+                if not event_name:
+                    continue
+
+                session.fire_pressure_event(event_name)
+                if event_name == "audience_size_increase":
+                    new_size = int(payload.get("to", session.audience_size))
+                    states, stubbornness = expand_audience(
+                        current_states=session.avatar_states,
+                        stubbornness_factors=session.avatar_stubbornness,
+                        new_size=new_size,
+                        current_engagement=session.engagement_score,
+                    )
+                    session.audience_size = new_size
+                    session.avatar_states = states
+                    session.avatar_stubbornness = stubbornness
+                elif event_name == "distraction_inject":
+                    runtime_state["last_distraction_time"] = session.get_elapsed_seconds()
+
+                outbound = PressureEventMessage(type="pressure_event", event=event_name, payload=payload)
+                await _safe_send_json(websocket, outbound.model_dump())
+        except Exception as exc:
+            logger.exception("pressure_loop failed: %s", exc)
+
+        await asyncio.sleep(5)
+
+
+async def handle_session_end(
+    session: SessionState,
+    websocket: WebSocket,
+    tasks: list[asyncio.Task],
+    qa_queue: "asyncio.Queue[str]",
+    stop_event: asyncio.Event,
+) -> None:
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    question = session.adversarial_question.strip()
+    if question:
+        qa_msg = QAQuestionMessage(type="qa_question", question=question, audio_base64=None)
+        await _safe_send_json(websocket, qa_msg.model_dump())
+
+        try:
+            answer = await asyncio.wait_for(qa_queue.get(), timeout=60)
+            session.user_qa_answer = answer
+            followup = await generate_followup_question(question, answer, session.claims)
+            if followup:
+                followup_msg = QAQuestionMessage(type="qa_question", question=followup, audio_base64=None)
+                await _safe_send_json(websocket, followup_msg.model_dump())
+        except asyncio.TimeoutError:
+            logger.info("QA answer timeout for session %s", session.session_id)
+
+    session.ended_at = session.ended_at or datetime.now(timezone.utc)
+    snapshot = session.to_mongo()
+    snapshot["elapsed_seconds"] = session.get_elapsed_seconds()
+    breakdown = await generate_session_breakdown(snapshot)
+    session.final_breakdown = breakdown
+
+    breakdown_msg = SessionBreakdownMessage(
+        type="session_breakdown",
+        breakdown=breakdown,
+        engagement_history=session.engagement_history,
+    )
+    await _safe_send_json(websocket, breakdown_msg.model_dump())
+
+    stop_event.set()
+    await save_session(session.to_mongo())
+
+    try:
+        await websocket.close(code=1000, reason="Session complete")
+    except Exception:
+        pass
+
+
+async def handle_session(websocket: WebSocket, session_id: str, session: SessionState) -> None:
+    del session_id
+
+    stop_event = asyncio.Event()
+    audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
+    qa_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=2)
+    runtime_state: dict[str, Any] = {"last_distraction_time": 0.0}
+
+    connected = ConnectedMessage(type="connected", session_id=session.session_id, config=session.get_snapshot())
+    await _safe_send_json(websocket, connected.model_dump())
+
+    deepgram_task = asyncio.create_task(handle_deepgram_stream(session, websocket, audio_queue, stop_event))
+    tasks = [
+        asyncio.create_task(fusion_loop(session, websocket, stop_event)),
+        asyncio.create_task(coach_loop(session, websocket, stop_event)),
+        asyncio.create_task(argument_loop(session, websocket, stop_event)),
+        asyncio.create_task(pressure_loop(session, websocket, stop_event, runtime_state)),
+    ]
+
+    try:
+        while not stop_event.is_set():
+            packet = await websocket.receive()
+
+            if packet.get("type") == "websocket.disconnect":
+                raise WebSocketDisconnect()
+
+            if packet.get("bytes") is not None:
+                try:
+                    audio_queue.put_nowait(packet["bytes"])
+                except asyncio.QueueFull:
+                    pass
+                continue
+
+            text = packet.get("text")
+            if not text:
+                continue
+
+            try:
+                msg = json.loads(text)
+            except json.JSONDecodeError:
+                await _send_error(websocket, "Invalid JSON payload", "bad_json")
+                continue
+
+            msg_type = msg.get("type")
+            if msg_type == "vision_update":
+                await handle_vision_update(msg, session)
+            elif msg_type == "session_end":
+                await handle_session_end(session, websocket, tasks, qa_queue, stop_event)
+                break
+            elif msg_type == "qa_answer":
+                answer = str(msg.get("answer", "")).strip()
+                if answer:
+                    session.user_qa_answer = answer
+                    try:
+                        qa_queue.put_nowait(answer)
+                    except asyncio.QueueFull:
+                        pass
+    except WebSocketDisconnect:
+        logger.info("WebSocket disconnected for session %s", session.session_id)
+    except Exception as exc:
+        logger.exception("Session handler failed: %s", exc)
+        await _send_error(websocket, "Internal session error", "internal_error")
+    finally:
+        stop_event.set()
+        for task in tasks:
+            task.cancel()
+        deepgram_task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(deepgram_task, return_exceptions=True)
+        session.ended_at = session.ended_at or datetime.now(timezone.utc)
+        await save_session(session.to_mongo())

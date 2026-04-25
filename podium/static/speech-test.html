@@ -1,0 +1,1133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Podium Live</title>
+  <style>
+    :root {
+      --bg: #070b18;
+      --panel: rgba(13, 18, 35, 0.84);
+      --panel-strong: rgba(15, 23, 42, 0.96);
+      --panel-border: rgba(148, 163, 184, 0.16);
+      --text: #e8eefc;
+      --muted: #94a3b8;
+      --accent: #60f4d2;
+      --accent-2: #7aa7ff;
+      --accent-3: #f9a8d4;
+      --ok: #34d399;
+      --warn: #fbbf24;
+      --bad: #fb7185;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(96, 244, 210, 0.16), transparent 25%),
+        radial-gradient(circle at top right, rgba(122, 167, 255, 0.16), transparent 22%),
+        radial-gradient(circle at bottom left, rgba(249, 168, 212, 0.12), transparent 26%),
+        linear-gradient(135deg, #050814 0%, #090f1f 50%, #0f172a 100%);
+    }
+
+    body {
+      min-height: 100vh;
+    }
+
+    .shell {
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 24px 20px 36px;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 16px;
+      margin-bottom: 22px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .logo {
+      width: 46px;
+      height: 46px;
+      border-radius: 15px;
+      background:
+        linear-gradient(135deg, rgba(96, 244, 210, 0.95), rgba(122, 167, 255, 0.9));
+      box-shadow: 0 10px 30px rgba(96, 244, 210, 0.18);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .logo::after {
+      content: "";
+      position: absolute;
+      inset: 9px;
+      border-radius: 11px;
+      border: 2px solid rgba(5, 8, 20, 0.5);
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-size: 1.05rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: #dbeafe;
+    }
+
+    .brand p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 10px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      background: rgba(15, 23, 42, 0.72);
+      color: #dbeafe;
+      font-size: 0.88rem;
+      backdrop-filter: blur(14px);
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--warn);
+      box-shadow: 0 0 0 6px rgba(251, 191, 36, 0.1);
+      flex: none;
+    }
+
+    .dot.ok { background: var(--ok); box-shadow: 0 0 0 6px rgba(52, 211, 153, 0.1); }
+    .dot.bad { background: var(--bad); box-shadow: 0 0 0 6px rgba(251, 113, 133, 0.1); }
+
+    .hero {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 18px;
+      margin-bottom: 18px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .hero-copy {
+      padding: 28px;
+      min-height: 300px;
+      display: grid;
+      gap: 18px;
+      align-content: space-between;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-copy::before {
+      content: "";
+      position: absolute;
+      inset: auto -80px -120px auto;
+      width: 280px;
+      height: 280px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(96, 244, 210, 0.18), transparent 64%);
+      filter: blur(4px);
+      pointer-events: none;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--accent);
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 0 6px rgba(96, 244, 210, 0.1);
+    }
+
+    .hero h2 {
+      margin: 0;
+      font-size: clamp(2.2rem, 5vw, 4.8rem);
+      line-height: 0.94;
+      letter-spacing: -0.06em;
+      max-width: 11ch;
+    }
+
+    .hero p {
+      max-width: 64ch;
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+      font-size: 1rem;
+    }
+
+    .hero-stats {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    .stat {
+      border-radius: 18px;
+      padding: 14px 16px;
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(148, 163, 184, 0.1);
+    }
+
+    .stat .value {
+      font-size: 1.25rem;
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      margin-bottom: 4px;
+    }
+
+    .stat .label {
+      color: var(--muted);
+      font-size: 0.82rem;
+      line-height: 1.4;
+    }
+
+    .stage {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+    }
+
+    .video-frame {
+      position: relative;
+      border-radius: 22px;
+      overflow: hidden;
+      background: linear-gradient(180deg, rgba(15, 23, 42, 0.8), rgba(2, 6, 23, 0.92));
+      border: 1px solid rgba(148, 163, 184, 0.18);
+      min-height: 440px;
+    }
+
+    video {
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+      background: #060a12;
+      transform: scaleX(-1);
+    }
+
+    .video-overlay {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      align-content: space-between;
+      pointer-events: none;
+      padding: 14px;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: space-between;
+      align-items: flex-start;
+    }
+
+    .badge {
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(15, 23, 42, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.16);
+      color: #e2e8f0;
+      font-size: 0.82rem;
+      backdrop-filter: blur(12px);
+    }
+
+    .badge strong {
+      color: #fff;
+    }
+
+    .meter-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    .meter {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(15, 23, 42, 0.7);
+      border: 1px solid rgba(148, 163, 184, 0.1);
+    }
+
+    .meter .value {
+      font-size: 1.8rem;
+      font-weight: 800;
+      letter-spacing: -0.05em;
+    }
+
+    .meter .label {
+      color: var(--muted);
+      font-size: 0.84rem;
+      line-height: 1.4;
+      margin-top: 4px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 360px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+      margin-top: 18px;
+    }
+
+    .panel {
+      padding: 20px;
+    }
+
+    .panel h3 {
+      margin: 0 0 14px;
+      font-size: 0.95rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: #cbd5e1;
+    }
+
+    label {
+      display: block;
+      margin: 12px 0 6px;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+
+    input, select, button {
+      width: 100%;
+      border-radius: 14px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(15, 23, 42, 0.92);
+      color: var(--text);
+      padding: 12px 14px;
+      font: inherit;
+      outline: none;
+    }
+
+    input:focus, select:focus {
+      border-color: rgba(96, 244, 210, 0.8);
+      box-shadow: 0 0 0 3px rgba(96, 244, 210, 0.12);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 16px;
+    }
+
+    button {
+      cursor: pointer;
+      font-weight: 800;
+      transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+    }
+
+    button:hover { transform: translateY(-1px); }
+
+    button:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
+
+    .primary {
+      border: none;
+      color: #06111f;
+      background: linear-gradient(135deg, var(--accent) 0%, #8bd3ff 55%, var(--accent-2) 100%);
+      box-shadow: 0 12px 30px rgba(96, 244, 210, 0.16);
+    }
+
+    .ghost {
+      background: rgba(15, 23, 42, 0.92);
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-top: 16px;
+      padding: 12px 14px;
+      border-radius: 16px;
+      background: rgba(15, 23, 42, 0.72);
+      color: #dbeafe;
+      border: 1px solid rgba(148, 163, 184, 0.1);
+    }
+
+    .status span:last-child {
+      line-height: 1.4;
+    }
+
+    .small-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .mini {
+      padding: 14px;
+      border-radius: 18px;
+      background: rgba(15, 23, 42, 0.72);
+      border: 1px solid rgba(148, 163, 184, 0.1);
+    }
+
+    .mini .label {
+      color: var(--muted);
+      font-size: 0.8rem;
+      margin-bottom: 8px;
+    }
+
+    .mini .value {
+      font-size: 1.05rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .output {
+      padding: 20px;
+      min-height: 720px;
+    }
+
+    .output-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    .output-head p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .log {
+      display: grid;
+      gap: 10px;
+      max-height: 620px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .entry {
+      border-radius: 16px;
+      padding: 12px 14px;
+      background: rgba(15, 23, 42, 0.75);
+      border: 1px solid rgba(148, 163, 184, 0.12);
+    }
+
+    .entry .kind {
+      font-size: 0.74rem;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      color: var(--accent);
+      margin-bottom: 6px;
+    }
+
+    .entry .body {
+      white-space: pre-wrap;
+      word-break: break-word;
+      color: #dbeafe;
+      font-size: 0.93rem;
+      line-height: 1.55;
+    }
+
+    .hint {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 0.88rem;
+      line-height: 1.55;
+    }
+
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+
+    .hidden-canvas { display: none; }
+
+    @media (max-width: 1180px) {
+      .hero,
+      .layout { grid-template-columns: 1fr; }
+
+      .hero-copy {
+        min-height: 0;
+      }
+
+      .output {
+        min-height: auto;
+      }
+    }
+
+    @media (max-width: 760px) {
+      .shell { padding: 16px 12px 28px; }
+      .topbar { flex-direction: column; align-items: flex-start; }
+      .pill-row { justify-content: flex-start; }
+      .hero-copy { padding: 20px; }
+      .meter-grid,
+      .hero-stats,
+      .row,
+      .actions,
+      .small-grid { grid-template-columns: 1fr; }
+      .video-frame { min-height: 300px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="topbar">
+      <div class="brand">
+        <div class="logo"></div>
+        <div>
+          <h1>Podium Live</h1>
+          <p>Real-time speaking coach with mic, webcam, audience simulation, and AI feedback.</p>
+        </div>
+      </div>
+      <div class="pill-row">
+        <div class="pill"><span class="dot" id="socketDot"></span><span id="socketState">Disconnected</span></div>
+        <div class="pill"><span class="dot" id="cameraDot"></span><span id="cameraState">Camera off</span></div>
+        <div class="pill"><span class="dot" id="audioDot"></span><span id="audioState">Mic off</span></div>
+      </div>
+    </div>
+
+    <section class="hero">
+      <div class="card hero-copy">
+        <div>
+          <div class="eyebrow">Public speaking coach</div>
+          <h2>Practice with a live audience, camera, and feedback loop.</h2>
+          <p>
+            This is a simple product-style frontend that shows your webcam, streams mic audio, sends lightweight vision
+            signals, and displays live websocket events from the backend. It is intentionally minimal, but it is the
+            whole loop: you, the camera, the mic, and the coach.
+          </p>
+        </div>
+        <div class="hero-stats">
+          <div class="stat">
+            <div class="value" id="statScore">--</div>
+            <div class="label">Current engagement score</div>
+          </div>
+          <div class="stat">
+            <div class="value" id="statSignal">--</div>
+            <div class="label">Dominant signal</div>
+          </div>
+          <div class="stat">
+            <div class="value" id="statVision">--</div>
+            <div class="label">Vision snapshot</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card stage">
+        <div class="video-frame">
+          <video id="video" autoplay playsinline muted></video>
+          <div class="video-overlay">
+            <div class="badge-row">
+              <div class="badge"><strong>Session</strong> <span id="sessionLabel">speech-demo</span></div>
+              <div class="badge"><strong>Scenario</strong> <span id="scenarioLabel">Investor pitch</span></div>
+            </div>
+            <div class="badge-row" style="align-items:flex-end;">
+              <div class="badge">Eye contact <strong id="eyeContactBadge">--</strong></div>
+              <div class="badge">Motion <strong id="motionBadge">--</strong></div>
+              <div class="badge">Face <strong id="faceBadge">--</strong></div>
+            </div>
+          </div>
+        </div>
+        <div class="meter-grid">
+          <div class="meter">
+            <div class="value" id="micLevel">0%</div>
+            <div class="label">Microphone level from live PCM chunks</div>
+          </div>
+          <div class="meter">
+            <div class="value" id="visionLevel">0%</div>
+            <div class="label">Vision confidence from webcam frames</div>
+          </div>
+          <div class="meter">
+            <div class="value" id="wpmValue">0</div>
+            <div class="label">Words per minute estimate</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="layout">
+      <aside class="card panel">
+        <h3>Session Controls</h3>
+        <label for="sessionId">Session ID</label>
+        <input id="sessionId" value="speech-demo" />
+
+        <label for="userId">User ID</label>
+        <input id="userId" value="demo" />
+
+        <div class="row">
+          <div>
+            <label for="scenario">Scenario</label>
+            <select id="scenario">
+              <option value="investor_pitch" selected>Investor pitch</option>
+              <option value="job_interview">Job interview</option>
+              <option value="classroom">Classroom</option>
+              <option value="conference">Conference</option>
+            </select>
+          </div>
+          <div>
+            <label for="duration">Target duration</label>
+            <input id="duration" type="number" min="30" max="3600" value="120" />
+          </div>
+        </div>
+
+        <div class="actions">
+          <button id="startBtn" class="primary">Start session</button>
+          <button id="stopBtn" class="ghost" disabled>Stop</button>
+        </div>
+
+        <div class="status"><span class="dot" id="statusDot"></span><span id="statusText">Idle</span></div>
+
+        <div class="small-grid">
+          <div class="mini">
+            <div class="label">Transcripts</div>
+            <div class="value" id="transcriptCount">0</div>
+          </div>
+          <div class="mini">
+            <div class="label">Tips</div>
+            <div class="value" id="tipCount">0</div>
+          </div>
+          <div class="mini">
+            <div class="label">Audience updates</div>
+            <div class="value" id="audienceCount">0</div>
+          </div>
+          <div class="mini">
+            <div class="label">Pressure events</div>
+            <div class="value" id="pressureCount">0</div>
+          </div>
+        </div>
+
+        <div class="hint">
+          Tip: if you want actual transcripts, add <span class="mono">DEEPGRAM_API_KEY</span> in <span class="mono">podium/.env</span>.
+          If you want spoken tips, add <span class="mono">ELEVENLABS_API_KEY</span> too.
+        </div>
+      </aside>
+
+      <main class="card output">
+        <div class="output-head">
+          <div>
+            <h3>Live Output</h3>
+            <p>Websocket events, session lifecycle, and AI feedback appear here in real time.</p>
+          </div>
+        </div>
+        <div class="log" id="log"></div>
+      </main>
+    </section>
+  </div>
+
+  <canvas id="analysisCanvas" class="hidden-canvas"></canvas>
+
+  <script>
+    const el = (id) => document.getElementById(id);
+    const log = el('log');
+    const videoEl = el('video');
+    const canvas = el('analysisCanvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    const socketDot = el('socketDot');
+    const cameraDot = el('cameraDot');
+    const audioDot = el('audioDot');
+    const statusDot = el('statusDot');
+    const statusText = el('statusText');
+
+    const sessionLabel = el('sessionLabel');
+    const scenarioLabel = el('scenarioLabel');
+    const micLevel = el('micLevel');
+    const visionLevel = el('visionLevel');
+    const wpmValue = el('wpmValue');
+    const statScore = el('statScore');
+    const statSignal = el('statSignal');
+    const statVision = el('statVision');
+    const eyeContactBadge = el('eyeContactBadge');
+    const motionBadge = el('motionBadge');
+    const faceBadge = el('faceBadge');
+
+    const transcriptCount = el('transcriptCount');
+    const tipCount = el('tipCount');
+    const audienceCount = el('audienceCount');
+    const pressureCount = el('pressureCount');
+
+    const startBtn = el('startBtn');
+    const stopBtn = el('stopBtn');
+
+    const state = {
+      socket: null,
+      audioContext: null,
+      mediaStream: null,
+      demoStream: null,
+      sourceNode: null,
+      processorNode: null,
+      sessionActive: false,
+      lastFrame: null,
+      visionTimer: null,
+      demoTimer: null,
+      transcriptCount: 0,
+      tipCount: 0,
+      audienceCount: 0,
+      pressureCount: 0,
+      lastVisionPayload: null,
+      lastEngagement: null,
+      demoAngle: 0,
+    };
+
+    function setDot(dot, kind) {
+      dot.className = 'dot' + (kind ? ` ${kind}` : '');
+    }
+
+    function setStatus(text, kind = 'warn') {
+      statusText.textContent = text;
+      setDot(statusDot, kind);
+    }
+
+    function setSocketState(text, kind = 'warn') {
+      el('socketState').textContent = text;
+      setDot(socketDot, kind);
+    }
+
+    function setCameraState(text, kind = 'warn') {
+      el('cameraState').textContent = text;
+      setDot(cameraDot, kind);
+    }
+
+    function setAudioState(text, kind = 'warn') {
+      el('audioState').textContent = text;
+      setDot(audioDot, kind);
+    }
+
+    function append(kind, body) {
+      const entry = document.createElement('div');
+      entry.className = 'entry';
+      entry.innerHTML = `<div class="kind"></div><div class="body"></div>`;
+      entry.querySelector('.kind').textContent = kind;
+      entry.querySelector('.body').textContent = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+      log.prepend(entry);
+    }
+
+    function floatTo16BitPCM(input) {
+      const output = new DataView(new ArrayBuffer(input.length * 2));
+      for (let i = 0; i < input.length; i++) {
+        const sample = Math.max(-1, Math.min(1, input[i]));
+        output.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+      }
+      return output.buffer;
+    }
+
+    function resampleBuffer(buffer, inputRate, targetRate = 16000) {
+      if (inputRate === targetRate) return buffer;
+      const ratio = inputRate / targetRate;
+      const newLength = Math.max(1, Math.round(buffer.length / ratio));
+      const result = new Float32Array(newLength);
+      for (let i = 0; i < newLength; i++) {
+        const srcIndex = i * ratio;
+        const left = Math.floor(srcIndex);
+        const right = Math.min(buffer.length - 1, left + 1);
+        const frac = srcIndex - left;
+        result[i] = buffer[left] + (buffer[right] - buffer[left]) * frac;
+      }
+      return result;
+    }
+
+    function chunkLevel(buffer) {
+      let sum = 0;
+      for (let i = 0; i < buffer.length; i++) sum += buffer[i] * buffer[i];
+      return Math.min(1, Math.sqrt(sum / Math.max(1, buffer.length)) * 3.2);
+    }
+
+    function clamp(value, low = 0, high = 1) {
+      return Math.max(low, Math.min(high, value));
+    }
+
+    function frameStats() {
+      if (!videoEl.videoWidth || !videoEl.videoHeight) {
+        return { eyeContact: 0.5, motion: 0, faceDetected: false };
+      }
+
+      canvas.width = 160;
+      canvas.height = 120;
+      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      const image = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+
+      let total = 0;
+      let center = 0;
+      let motion = 0;
+      const centerStartX = Math.floor(canvas.width * 0.3);
+      const centerEndX = Math.floor(canvas.width * 0.7);
+      const centerStartY = Math.floor(canvas.height * 0.2);
+      const centerEndY = Math.floor(canvas.height * 0.8);
+
+      for (let y = 0; y < canvas.height; y++) {
+        for (let x = 0; x < canvas.width; x++) {
+          const idx = (y * canvas.width + x) * 4;
+          const brightness = (image[idx] + image[idx + 1] + image[idx + 2]) / 3;
+          total += brightness;
+          if (x >= centerStartX && x <= centerEndX && y >= centerStartY && y <= centerEndY) {
+            center += brightness;
+          }
+        }
+      }
+
+      if (state.lastFrame) {
+        for (let i = 0; i < image.length; i += 8) {
+          motion += Math.abs(image[i] - state.lastFrame[i]) + Math.abs(image[i + 1] - state.lastFrame[i + 1]) + Math.abs(image[i + 2] - state.lastFrame[i + 2]);
+        }
+      }
+
+      state.lastFrame = new Uint8ClampedArray(image);
+
+      const totalPixels = canvas.width * canvas.height;
+      const centerPixels = (centerEndX - centerStartX) * (centerEndY - centerStartY);
+      const avg = total / totalPixels;
+      const centerAvg = center / Math.max(1, centerPixels);
+      const motionScore = clamp(motion / (image.length * 0.6), 0, 1);
+      const eyeContact = clamp(1 - Math.abs(centerAvg - avg) / 140 + (faceDetectedBias() * 0.08), 0.1, 1);
+      return {
+        eyeContact,
+        motion: motionScore,
+        faceDetected: true,
+      };
+    }
+
+    function faceDetectedBias() {
+      return videoEl.videoWidth ? 1 : 0;
+    }
+
+    function updateVisionBadge(payload) {
+      state.lastVisionPayload = payload;
+      eyeContactBadge.textContent = `${Math.round(payload.eye_contact * 100)}%`;
+      motionBadge.textContent = `${Math.round((payload.motion_score ?? 0) * 100)}%`;
+      faceBadge.textContent = payload.face_detected ? 'yes' : 'no';
+      visionLevel.textContent = `${Math.round((payload.eye_contact ?? 0) * 100)}%`;
+      statVision.textContent = payload.face_detected ? 'camera live' : 'no face';
+    }
+
+    function startVisionLoop(source) {
+      if (state.visionTimer) {
+        clearInterval(state.visionTimer);
+      }
+
+      state.visionTimer = window.setInterval(() => {
+        if (!state.sessionActive || !state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+
+        const stats = source();
+        const payload = {
+          type: 'vision_update',
+          eye_contact: stats.eyeContact,
+          face_detected: stats.faceDetected,
+          gesture_detected: stats.motion > 0.12,
+          timestamp: Date.now() / 1000,
+          motion_score: stats.motion,
+        };
+
+        state.socket.send(JSON.stringify(payload));
+        updateVisionBadge(payload);
+      }, 500);
+    }
+
+    function startDemoMode() {
+      const demoCanvas = document.createElement('canvas');
+      demoCanvas.width = 1280;
+      demoCanvas.height = 720;
+      const demoCtx = demoCanvas.getContext('2d');
+
+      const drawDemoFrame = () => {
+        if (!state.sessionActive) return;
+
+        state.demoAngle += 0.02;
+        const w = demoCanvas.width;
+        const h = demoCanvas.height;
+
+        const grad = demoCtx.createLinearGradient(0, 0, w, h);
+        grad.addColorStop(0, '#07111f');
+        grad.addColorStop(0.5, '#0c1730');
+        grad.addColorStop(1, '#12244d');
+        demoCtx.fillStyle = grad;
+        demoCtx.fillRect(0, 0, w, h);
+
+        demoCtx.fillStyle = 'rgba(96, 244, 210, 0.15)';
+        demoCtx.fillRect(0, 0, w, h);
+
+        for (let i = 0; i < 6; i++) {
+          const x = w * 0.5 + Math.cos(state.demoAngle + i) * (140 + i * 22);
+          const y = h * 0.45 + Math.sin(state.demoAngle * 1.4 + i * 0.7) * (90 + i * 10);
+          demoCtx.beginPath();
+          demoCtx.fillStyle = `rgba(122, 167, 255, ${0.08 + i * 0.02})`;
+          demoCtx.arc(x, y, 92 + i * 10, 0, Math.PI * 2);
+          demoCtx.fill();
+        }
+
+        demoCtx.fillStyle = 'rgba(255,255,255,0.88)';
+        demoCtx.font = '700 52px Inter, system-ui, sans-serif';
+        demoCtx.fillText('Podium demo mode', 48, 90);
+        demoCtx.font = '500 24px Inter, system-ui, sans-serif';
+        demoCtx.fillStyle = 'rgba(219, 234, 254, 0.9)';
+        demoCtx.fillText('Camera permission unavailable, so this synthetic feed keeps the product view alive.', 48, 132);
+
+        demoCtx.fillStyle = 'rgba(15, 23, 42, 0.8)';
+        demoCtx.fillRect(48, 180, 420, 250);
+        demoCtx.fillStyle = 'rgba(96, 244, 210, 0.95)';
+        demoCtx.beginPath();
+        demoCtx.arc(258, 305, 92, 0, Math.PI * 2);
+        demoCtx.fill();
+        demoCtx.fillStyle = '#06111f';
+        demoCtx.beginPath();
+        demoCtx.arc(224, 282, 12, 0, Math.PI * 2);
+        demoCtx.arc(292, 282, 12, 0, Math.PI * 2);
+        demoCtx.fill();
+        demoCtx.fillRect(220, 348, 76, 8);
+
+        demoCtx.fillStyle = 'rgba(15, 23, 42, 0.7)';
+        demoCtx.fillRect(w - 340, h - 180, 280, 120);
+        demoCtx.fillStyle = 'rgba(255,255,255,0.9)';
+        demoCtx.font = '700 20px Inter, system-ui, sans-serif';
+        demoCtx.fillText('Live feedback', w - 310, h - 130);
+        demoCtx.font = '500 16px Inter, system-ui, sans-serif';
+        demoCtx.fillStyle = 'rgba(219, 234, 254, 0.8)';
+        demoCtx.fillText('Engagement and audience events are real websocket updates.', w - 310, h - 102);
+
+        if (!state.demoStream) {
+          state.demoStream = demoCanvas.captureStream(30);
+          videoEl.srcObject = state.demoStream;
+          setCameraState('Demo camera', 'ok');
+        }
+
+        if (state.sessionActive) {
+          requestAnimationFrame(drawDemoFrame);
+        }
+      };
+
+      requestAnimationFrame(drawDemoFrame);
+      startVisionLoop(() => {
+        const motion = 0.35 + 0.25 * Math.abs(Math.sin(state.demoAngle));
+        const eyeContact = clamp(0.55 + 0.25 * Math.sin(state.demoAngle * 1.2), 0.1, 0.95);
+        return { eyeContact, motion, faceDetected: true };
+      });
+
+      setCameraState('Demo camera', 'ok');
+      setAudioState('Demo mic', 'ok');
+      setStatus('Demo mode active. Use it to explore the product.', 'ok');
+      append('mode', 'Camera permission was unavailable, so the page switched to a demo visual feed.');
+    }
+
+    async function startSession() {
+      if (state.sessionActive) return;
+
+      const sessionId = el('sessionId').value.trim() || 'speech-demo';
+      const userId = el('userId').value.trim() || 'demo';
+      const scenario = el('scenario').value;
+      const duration = Number(el('duration').value || 120);
+
+      sessionLabel.textContent = sessionId;
+      scenarioLabel.textContent = scenario.replace('_', ' ');
+      statSignal.textContent = '--';
+      statScore.textContent = '--';
+      statVision.textContent = '--';
+
+      const wsUrl = `ws://${location.host}/ws/${encodeURIComponent(sessionId)}?user_id=${encodeURIComponent(userId)}&scenario=${encodeURIComponent(scenario)}&target_duration=${encodeURIComponent(duration)}`;
+      setStatus('Connecting to backend...', 'warn');
+      setSocketState('Connecting', 'warn');
+
+      state.socket = new WebSocket(wsUrl);
+      state.socket.binaryType = 'arraybuffer';
+
+      state.socket.onopen = async () => {
+        append('socket', `Connected to ${wsUrl}`);
+        setSocketState('Connected', 'ok');
+        setStatus('Requesting camera and microphone...', 'ok');
+
+        try {
+          state.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: 'user' } });
+
+          videoEl.srcObject = state.mediaStream;
+          await videoEl.play();
+          setCameraState('Camera live', 'ok');
+          setAudioState('Mic live', 'ok');
+
+          state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          state.sourceNode = state.audioContext.createMediaStreamSource(state.mediaStream);
+          state.processorNode = state.audioContext.createScriptProcessor(4096, 1, 1);
+
+          state.processorNode.onaudioprocess = (event) => {
+            if (!state.socket || state.socket.readyState !== WebSocket.OPEN) return;
+            const input = event.inputBuffer.getChannelData(0);
+            const resampled = resampleBuffer(input, state.audioContext.sampleRate, 16000);
+            micLevel.textContent = `${Math.round(chunkLevel(resampled) * 100)}%`;
+            state.socket.send(floatTo16BitPCM(resampled));
+          };
+
+          state.sourceNode.connect(state.processorNode);
+          state.processorNode.connect(state.audioContext.destination);
+
+          state.sessionActive = true;
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+          setStatus('Session live. Start speaking.', 'ok');
+          append('session', 'Camera and microphone started.');
+
+          startVisionLoop(frameStats);
+        } catch (error) {
+          append('warning', error.message || String(error));
+          startDemoMode();
+          state.sessionActive = true;
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+        }
+      };
+
+      state.socket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          append(data.type || 'message', data);
+
+          if (data.type === 'connected') {
+            setStatus(`Session ready: ${data.session_id}`, 'ok');
+          }
+          if (data.type === 'transcript') {
+            state.transcriptCount += 1;
+            transcriptCount.textContent = String(state.transcriptCount);
+            wpmValue.textContent = Math.round(data.wpm || 0);
+            statScore.textContent = `${Math.round((state.lastEngagement?.score ?? 0.5) * 100)}%`;
+            setStatus(`Transcript: ${data.text}`, 'ok');
+          }
+          if (data.type === 'engagement_update') {
+            state.lastEngagement = data;
+            statScore.textContent = `${Math.round((data.score ?? 0) * 100)}%`;
+            statSignal.textContent = data.dominant_signal || '--';
+          }
+          if (data.type === 'audience_update') {
+            state.audienceCount += 1;
+            audienceCount.textContent = String(state.audienceCount);
+          }
+          if (data.type === 'coach_tip') {
+            state.tipCount += 1;
+            tipCount.textContent = String(state.tipCount);
+            setStatus(`Coach tip: ${data.tip}`, 'ok');
+          }
+          if (data.type === 'pressure_event') {
+            state.pressureCount += 1;
+            pressureCount.textContent = String(state.pressureCount);
+          }
+          if (data.type === 'session_breakdown') {
+            setStatus('Session complete.', 'ok');
+          }
+        } catch (error) {
+          append('raw', event.data);
+        }
+      };
+
+      state.socket.onerror = () => {
+        setStatus('Socket error', 'bad');
+        setSocketState('Error', 'bad');
+      };
+
+      state.socket.onclose = () => {
+        state.sessionActive = false;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        micLevel.textContent = '0%';
+        visionLevel.textContent = '0%';
+        if (state.visionTimer) {
+          clearInterval(state.visionTimer);
+          state.visionTimer = null;
+        }
+        append('socket', 'Closed');
+        if (statusText.textContent !== 'Session complete.') {
+          setStatus('Disconnected', 'warn');
+          setSocketState('Disconnected', 'warn');
+        }
+      };
+    }
+
+    async function stopSession() {
+      if (!state.sessionActive) return;
+      setStatus('Stopping session...', 'warn');
+
+      try {
+        if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+          state.socket.send(JSON.stringify({ type: 'session_end', user_id: el('userId').value.trim() || 'demo' }));
+        }
+      } catch (error) {
+        append('error', String(error));
+      }
+
+      if (state.visionTimer) {
+        clearInterval(state.visionTimer);
+        state.visionTimer = null;
+      }
+      if (state.demoStream) {
+        state.demoStream.getTracks().forEach((track) => track.stop());
+        state.demoStream = null;
+      }
+      if (state.processorNode) state.processorNode.disconnect();
+      if (state.sourceNode) state.sourceNode.disconnect();
+      if (state.audioContext) await state.audioContext.close();
+      if (state.mediaStream) state.mediaStream.getTracks().forEach((track) => track.stop());
+      if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+        state.socket.close(1000, 'done');
+      }
+
+      state.sessionActive = false;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      setCameraState('Camera off', 'warn');
+      setAudioState('Mic off', 'warn');
+      setSocketState('Disconnected', 'warn');
+    }
+
+    startBtn.addEventListener('click', () => {
+      startSession().catch((error) => {
+        append('error', error.message || String(error));
+        setStatus('Camera or microphone unavailable', 'bad');
+        setSocketState('Disconnected', 'bad');
+        state.sessionActive = false;
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      });
+    });
+
+    stopBtn.addEventListener('click', () => stopSession());
+
+    append('info', 'Open this page on localhost, click Start session, allow mic + camera, then speak.');
+  </script>
+</body>
+</html>
