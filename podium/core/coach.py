@@ -7,7 +7,6 @@ import os
 
 import httpx
 
-from .argument import call_ollama
 from .speech import count_fillers
 
 logger = logging.getLogger(__name__)
@@ -68,6 +67,31 @@ Include 2-3 high moments and 2-3 low moments minimum.
 ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
 
+async def call_gemini(prompt: str, timeout_seconds: float = 10.0) -> str | None:
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        logger.warning("GEMINI_API_KEY not set")
+        return None
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            response = await client.post(url, json=payload)
+        if response.status_code != 200:
+            logger.warning("Gemini non-200: %s %s", response.status_code, response.text)
+            return None
+        data = response.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as exc:
+        logger.warning("Gemini call failed: %s", exc)
+        return None
+
+
 def _safe_json_parse(raw: str | None) -> dict | None:
     if not raw:
         return None
@@ -106,7 +130,7 @@ async def generate_realtime_tip(
         recent_fillers=", ".join(filler_words) if filler_words else "none",
     )
 
-    raw = await call_ollama(prompt=prompt, timeout_seconds=3)
+    raw = await call_gemini(prompt=prompt, timeout_seconds=3)
     tip = (raw or "").strip()
     if not tip:
         return None
@@ -115,8 +139,16 @@ async def generate_realtime_tip(
 
 async def generate_session_breakdown(session_snapshot: dict) -> dict:
     engagement_history = session_snapshot.get("engagement_history", [])
-    eye_samples = [float(entry.get("score", 0.0)) for entry in engagement_history if isinstance(entry, dict)]
-    avg_engagement = sum(eye_samples) / len(eye_samples) if eye_samples else float(session_snapshot.get("engagement_score", 0.0))
+    eye_samples = [
+        float(entry.get("score", 0.0))
+        for entry in engagement_history
+        if isinstance(entry, dict)
+    ]
+    avg_engagement = (
+        sum(eye_samples) / len(eye_samples)
+        if eye_samples
+        else float(session_snapshot.get("engagement_score", 0.0))
+    )
 
     prompt = BREAKDOWN_PROMPT.format(
         scenario=session_snapshot.get("scenario", "investor_pitch"),
@@ -128,10 +160,12 @@ async def generate_session_breakdown(session_snapshot: dict) -> dict:
         avg_wpm=round(float(session_snapshot.get("words_per_minute", 0.0)), 2),
         avg_eye_contact=round(float(session_snapshot.get("eye_contact_score", 0.0)), 3),
         weakest_claim=session_snapshot.get("weakest_claim", ""),
-        pressure_events=json.dumps(session_snapshot.get("pressure_events_fired", []), ensure_ascii=True),
+        pressure_events=json.dumps(
+            session_snapshot.get("pressure_events_fired", []), ensure_ascii=True
+        ),
     )
 
-    raw = await call_ollama(prompt=prompt, timeout_seconds=20)
+    raw = await call_gemini(prompt=prompt, timeout_seconds=20)
     parsed = _safe_json_parse(raw)
     if not parsed:
         return fallback_breakdown(session_snapshot)
@@ -153,11 +187,11 @@ def fallback_breakdown(session_snapshot: dict) -> dict:
     strengths.append("Handled dynamic audience pressure events")
 
     if filler_count > 15:
-        improvements.append("Reduce filler words by using shorter deliberate pauses")
+        improvements.append("Reduce filler words — use deliberate pauses instead")
     if wpm < 110:
         improvements.append("Increase speaking pace to maintain momentum")
     elif wpm > 170:
-        improvements.append("Slow pace slightly to improve clarity")
+        improvements.append("Slow down slightly to improve clarity")
     if eye < 0.6:
         improvements.append("Improve eye contact consistency with the camera")
 
@@ -171,7 +205,7 @@ def fallback_breakdown(session_snapshot: dict) -> dict:
         "strengths": strengths[:3],
         "improvements": improvements[:3],
         "next_session_focus": "Deliver stronger evidence for each major claim.",
-        "argument_feedback": "Strengthen the weakest claim with one concrete example or metric.",
+        "argument_feedback": "Strengthen the weakest claim with one concrete example.",
     }
 
 
@@ -181,7 +215,7 @@ async def voice_tip(tip: str, api_key: str) -> str | None:
 
     payload = {
         "text": tip,
-        "model_id": "eleven_monolingual_v1",
+        "model_id": "eleven_flash_v2_5",  # upgraded from eleven_monolingual_v1
         "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
     }
     headers = {
@@ -194,9 +228,9 @@ async def voice_tip(tip: str, api_key: str) -> str | None:
         async with httpx.AsyncClient(timeout=3.0) as client:
             response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
-            logger.warning("ElevenLabs non-200 status: %s", response.status_code)
+            logger.warning("ElevenLabs non-200: %s", response.status_code)
             return None
         return base64.b64encode(response.content).decode("ascii")
     except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
-        logger.warning("ElevenLabs voice generation failed: %s", exc)
+        logger.warning("ElevenLabs voice failed: %s", exc)
         return None

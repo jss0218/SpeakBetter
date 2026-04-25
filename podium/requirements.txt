@@ -4,7 +4,6 @@ websockets
 python-dotenv
 motor
 pymongo
-deepgram-sdk
 uagents
 httpx
 pydantic

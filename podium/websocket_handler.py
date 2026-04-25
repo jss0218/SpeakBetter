@@ -13,6 +13,7 @@ from starlette.websockets import WebSocketDisconnect
 from podium.core.argument import extract_claims_and_question, generate_followup_question
 from podium.core.audience import calculate_avatar_states, expand_audience
 from podium.core.coach import generate_realtime_tip, generate_session_breakdown, voice_tip
+from podium.core.elevenlabs_stt import transcribe_pcm_s16le_16k_mono
 from podium.core.fusion import calculate_engagement, calculate_trend
 from podium.core.pressure import check_pressure_events
 from podium.core.speech import calculate_wpm, count_fillers, normalize_amplitude
@@ -59,78 +60,78 @@ async def _send_error(websocket: WebSocket, message: str, code: str) -> None:
     await _safe_send_json(websocket, error.model_dump())
 
 
-async def handle_deepgram_stream(
+async def _handle_transcript_text(session: SessionState, websocket: WebSocket, text: str) -> None:
+    clean = (text or "").strip()
+    if not clean:
+        session.pause_detected = True
+        session.pause_count += 1
+        return
+
+    session.pause_detected = False
+    fillers, _ = count_fillers(clean)
+    projected_word_count = session.word_count + len(clean.split())
+    wpm = calculate_wpm(projected_word_count, session.get_elapsed_seconds())
+    session.add_transcript_chunk(clean, fillers, wpm, session.vocal_energy)
+    payload = TranscriptMessage(
+        type="transcript",
+        text=clean,
+        filler_count=session.filler_count,
+        wpm=session.words_per_minute,
+        pause_detected=session.pause_detected,
+        timestamp=session.get_elapsed_seconds(),
+    )
+    await _safe_send_json(websocket, payload.model_dump())
+
+
+def _extract_incremental_delta(prev: str, current: str) -> str:
+    """
+    Given a growing transcript, extract the "new" portion robustly.
+
+    We intentionally operate on token boundaries (whitespace-separated words)
+    because STT outputs can vary in punctuation/casing across overlapping windows.
+    """
+    prev_tokens = (prev or "").split()
+    cur_tokens = (current or "").split()
+    if not cur_tokens:
+        return ""
+    if not prev_tokens:
+        return " ".join(cur_tokens).strip()
+
+    # Find the longest common prefix in tokens.
+    i = 0
+    max_i = min(len(prev_tokens), len(cur_tokens))
+    while i < max_i and prev_tokens[i].lower() == cur_tokens[i].lower():
+        i += 1
+
+    delta = " ".join(cur_tokens[i:]).strip()
+    return delta
+
+
+async def handle_elevenlabs_stt_stream(
     session: SessionState,
     websocket: WebSocket,
     audio_queue: "asyncio.Queue[bytes]",
     stop_event: asyncio.Event,
 ) -> None:
-    deepgram_conn = None
-
-    async def _handle_transcript_text(text: str) -> None:
-        clean = (text or "").strip()
-        if not clean:
-            session.pause_detected = True
-            session.pause_count += 1
-            return
-
-        session.pause_detected = False
-        fillers, _ = count_fillers(clean)
-        projected_word_count = session.word_count + len(clean.split())
-        wpm = calculate_wpm(projected_word_count, session.get_elapsed_seconds())
-        session.add_transcript_chunk(clean, fillers, wpm, session.vocal_energy)
-        payload = TranscriptMessage(
-            type="transcript",
-            text=clean,
-            filler_count=session.filler_count,
-            wpm=session.words_per_minute,
-            pause_detected=session.pause_detected,
-            timestamp=session.get_elapsed_seconds(),
-        )
-        await _safe_send_json(websocket, payload.model_dump())
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
+    if not elevenlabs_key:
+        logger.info("ELEVENLABS_API_KEY not set; continuing with energy-only mode.")
 
     try:
-        deepgram_key = os.getenv("DEEPGRAM_API_KEY", "")
-        if deepgram_key:
-            try:
-                import deepgram  # type: ignore
+        # Rolling PCM16 @16kHz mono buffer; we keep overlap to avoid boundary dropouts.
+        pcm_buffer = bytearray()
+        last_text = ""
+        last_request_at = 0.0
 
-                DeepgramClient = getattr(deepgram, "DeepgramClient", None)
-                LiveTranscriptionEvents = getattr(deepgram, "LiveTranscriptionEvents", None)
-                LiveOptions = getattr(deepgram, "LiveOptions", None)
-                if DeepgramClient and LiveTranscriptionEvents and LiveOptions:
-                    dg = DeepgramClient(deepgram_key)
-                    listen = getattr(dg, "listen", None)
-                    if listen and hasattr(listen, "asynclive"):
-                        deepgram_conn = listen.asynclive.v("1")
-                    elif listen and hasattr(listen, "asyncwebsocket"):
-                        deepgram_conn = listen.asyncwebsocket.v("1")
+        bytes_per_second = 16000 * 2
+        min_window_s = 2.5
+        request_every_s = 1.25
+        window_s = 6.0
+        max_buffer_s = 12.0
 
-                    if deepgram_conn is not None:
-                        async def _on_transcript(_, result, **kwargs):
-                            del kwargs
-                            try:
-                                channel = getattr(result, "channel", None)
-                                alternatives = getattr(channel, "alternatives", []) if channel else []
-                                first = alternatives[0] if alternatives else None
-                                transcript = getattr(first, "transcript", "") if first else ""
-                                await _handle_transcript_text(transcript)
-                            except Exception as exc:
-                                logger.warning("Deepgram transcript callback error: %s", exc)
-
-                        deepgram_conn.on(LiveTranscriptionEvents.Transcript, _on_transcript)
-                        options = LiveOptions(
-                            model="nova-2",
-                            language="en-US",
-                            encoding="linear16",
-                            channels=1,
-                            sample_rate=16000,
-                            interim_results=True,
-                            punctuate=True,
-                        )
-                        await deepgram_conn.start(options)
-            except Exception as exc:
-                logger.warning("Deepgram live setup failed; continuing with energy-only mode: %s", exc)
+        min_bytes = int(bytes_per_second * min_window_s)
+        window_bytes = int(bytes_per_second * window_s)
+        max_buffer_bytes = int(bytes_per_second * max_buffer_s)
 
         while not stop_event.is_set():
             try:
@@ -144,19 +145,49 @@ async def handle_deepgram_stream(
             energy = normalize_amplitude(_extract_pcm16_energy(chunk), session.energy_history)
             session.vocal_energy = energy
 
-            if deepgram_conn is not None:
-                try:
-                    await deepgram_conn.send(chunk)
-                except Exception as exc:
-                    logger.warning("Deepgram send failed: %s", exc)
-            else:
+            # Always buffer audio; STT will be skipped if key isn't set.
+            if chunk:
+                pcm_buffer.extend(chunk)
+                if len(pcm_buffer) > max_buffer_bytes:
+                    # Keep most recent audio only (rolling window).
+                    pcm_buffer = pcm_buffer[-max_buffer_bytes:]
+
+            now = session.get_elapsed_seconds()
+            if now - last_request_at < request_every_s:
+                continue
+            if len(pcm_buffer) < min_bytes:
+                continue
+            last_request_at = now
+
+            if not elevenlabs_key:
                 session.pause_detected = False
+                continue
+
+            # Transcribe the most recent window (overlap improves completeness).
+            payload_bytes = bytes(pcm_buffer[-window_bytes:]) if len(pcm_buffer) > window_bytes else bytes(pcm_buffer)
+
+            text = await transcribe_pcm_s16le_16k_mono(
+                pcm_bytes=payload_bytes,
+                api_key=elevenlabs_key,
+                model_id=os.getenv("ELEVENLABS_STT_MODEL_ID", "scribe_v2"),
+                language_code="eng",
+                tag_audio_events=False,
+                diarize=False,
+                no_verbatim=False,  # IMPORTANT: keep filler words like "um"/"uh"
+                timeout_seconds=8.0,
+            )
+            if not text:
+                continue
+
+            # Extract incremental delta from overlapping windows.
+            delta = _extract_incremental_delta(last_text, text)
+            last_text = text
+            if not delta:
+                continue
+
+            await _handle_transcript_text(session, websocket, delta)
     finally:
-        if deepgram_conn is not None:
-            try:
-                await deepgram_conn.finish()
-            except Exception:
-                pass
+        return
 
 
 async def handle_vision_update(msg: dict, session: SessionState) -> None:
@@ -368,7 +399,7 @@ async def handle_session(websocket: WebSocket, session_id: str, session: Session
     connected = ConnectedMessage(type="connected", session_id=session.session_id, config=session.get_snapshot())
     await _safe_send_json(websocket, connected.model_dump())
 
-    deepgram_task = asyncio.create_task(handle_deepgram_stream(session, websocket, audio_queue, stop_event))
+    stt_task = asyncio.create_task(handle_elevenlabs_stt_stream(session, websocket, audio_queue, stop_event))
     tasks = [
         asyncio.create_task(fusion_loop(session, websocket, stop_event)),
         asyncio.create_task(coach_loop(session, websocket, stop_event)),
@@ -423,8 +454,8 @@ async def handle_session(websocket: WebSocket, session_id: str, session: Session
         stop_event.set()
         for task in tasks:
             task.cancel()
-        deepgram_task.cancel()
+        stt_task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await asyncio.gather(deepgram_task, return_exceptions=True)
+        await asyncio.gather(stt_task, return_exceptions=True)
         session.ended_at = session.ended_at or datetime.now(timezone.utc)
         await save_session(session.to_mongo())

@@ -18,6 +18,8 @@ FILLER_WORDS = [
     "okay so",
     "and um",
     "i mean",
+    "umm",
+    "uhhh"
 ]
 
 

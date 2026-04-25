@@ -342,6 +342,19 @@
       outline: none;
     }
 
+    textarea {
+      width: 100%;
+      border-radius: 14px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(15, 23, 42, 0.92);
+      color: var(--text);
+      padding: 12px 14px;
+      font: inherit;
+      outline: none;
+      resize: vertical;
+      min-height: 140px;
+    }
+
     input:focus, select:focus {
       border-color: rgba(96, 244, 210, 0.8);
       box-shadow: 0 0 0 3px rgba(96, 244, 210, 0.12);
@@ -402,6 +415,20 @@
       grid-template-columns: repeat(2, 1fr);
       gap: 10px;
       margin-top: 14px;
+    }
+
+    .transcript-panel {
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid rgba(148, 163, 184, 0.10);
+      display: grid;
+      gap: 10px;
+    }
+
+    .transcript-actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
     }
 
     .mini {
@@ -525,6 +552,7 @@
         <div class="pill"><span class="dot" id="socketDot"></span><span id="socketState">Disconnected</span></div>
         <div class="pill"><span class="dot" id="cameraDot"></span><span id="cameraState">Camera off</span></div>
         <div class="pill"><span class="dot" id="audioDot"></span><span id="audioState">Mic off</span></div>
+        <div class="pill"><span class="dot" id="sttDot"></span><span id="sttState">STT idle</span></div>
       </div>
     </div>
 
@@ -639,8 +667,16 @@
         </div>
 
         <div class="hint">
-          Tip: if you want actual transcripts, add <span class="mono">DEEPGRAM_API_KEY</span> in <span class="mono">podium/.env</span>.
-          If you want spoken tips, add <span class="mono">ELEVENLABS_API_KEY</span> too.
+          Tip: set <span class="mono">ELEVENLABS_API_KEY</span> in <span class="mono">podium/.env</span> to enable speech-to-text (transcripts) and spoken coach tips.
+        </div>
+
+        <div class="transcript-panel">
+          <h3>Final Transcript</h3>
+          <textarea id="finalTranscript" readonly placeholder="After you stop the session, your transcript will appear here."></textarea>
+          <div class="transcript-actions">
+            <button id="copyTranscriptBtn" class="ghost" disabled>Copy</button>
+            <button id="clearTranscriptBtn" class="ghost">Clear</button>
+          </div>
         </div>
       </aside>
 
@@ -668,6 +704,7 @@
     const socketDot = el('socketDot');
     const cameraDot = el('cameraDot');
     const audioDot = el('audioDot');
+    const sttDot = el('sttDot');
     const statusDot = el('statusDot');
     const statusText = el('statusText');
 
@@ -687,6 +724,10 @@
     const tipCount = el('tipCount');
     const audienceCount = el('audienceCount');
     const pressureCount = el('pressureCount');
+
+    const finalTranscript = el('finalTranscript');
+    const copyTranscriptBtn = el('copyTranscriptBtn');
+    const clearTranscriptBtn = el('clearTranscriptBtn');
 
     const startBtn = el('startBtn');
     const stopBtn = el('stopBtn');
@@ -709,7 +750,14 @@
       lastVisionPayload: null,
       lastEngagement: null,
       demoAngle: 0,
+      transcriptParts: [],
     };
+
+    function renderFinalTranscript() {
+      const text = state.transcriptParts.join(' ').replace(/\s+/g, ' ').trim();
+      finalTranscript.value = text;
+      copyTranscriptBtn.disabled = !text;
+    }
 
     function setDot(dot, kind) {
       dot.className = 'dot' + (kind ? ` ${kind}` : '');
@@ -735,6 +783,18 @@
       setDot(audioDot, kind);
     }
 
+    function setSttState(text, kind = 'warn') {
+      el('sttState').textContent = text;
+      setDot(sttDot, kind);
+    }
+
+    function markSttErrorIfSilent() {
+      // If we never receive transcript messages, show a clear UI hint.
+      if (!state.sessionActive) return;
+      if (state.transcriptCount > 0) return;
+      setSttState('STT not returning transcripts yet', 'bad');
+    }
+
     function append(kind, body) {
       const entry = document.createElement('div');
       entry.className = 'entry';
@@ -742,6 +802,28 @@
       entry.querySelector('.kind').textContent = kind;
       entry.querySelector('.body').textContent = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
       log.prepend(entry);
+    }
+
+    function base64ToArrayBuffer(base64) {
+      const binary = atob(base64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes.buffer;
+    }
+
+    async function playTipAudio(base64Audio) {
+      if (!base64Audio) return;
+      try {
+        const buffer = base64ToArrayBuffer(base64Audio);
+        const blob = new Blob([buffer], { type: 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.volume = 1.0;
+        await audio.play();
+        audio.onended = () => URL.revokeObjectURL(url);
+      } catch (error) {
+        append('audio_error', error.message || String(error));
+      }
     }
 
     function floatTo16BitPCM(input) {
@@ -974,6 +1056,10 @@
         append('socket', `Connected to ${wsUrl}`);
         setSocketState('Connected', 'ok');
         setStatus('Requesting camera and microphone...', 'ok');
+        setSttState('STT listening...', 'warn');
+        state.transcriptParts = [];
+        renderFinalTranscript();
+        window.setTimeout(markSttErrorIfSilent, 10000);
 
         try {
           state.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: 'user' } });
@@ -1028,6 +1114,13 @@
             wpmValue.textContent = Math.round(data.wpm || 0);
             statScore.textContent = `${Math.round((state.lastEngagement?.score ?? 0.5) * 100)}%`;
             setStatus(`Transcript: ${data.text}`, 'ok');
+            setSttState(`STT ok: "${String(data.text || '').slice(0, 52)}${String(data.text || '').length > 52 ? '…' : ''}"`, 'ok');
+            const clean = String(data.text || '').trim();
+            if (clean) {
+              state.transcriptParts.push(clean);
+              if (state.transcriptParts.length > 200) state.transcriptParts = state.transcriptParts.slice(-200);
+              renderFinalTranscript();
+            }
           }
           if (data.type === 'engagement_update') {
             state.lastEngagement = data;
@@ -1042,6 +1135,9 @@
             state.tipCount += 1;
             tipCount.textContent = String(state.tipCount);
             setStatus(`Coach tip: ${data.tip}`, 'ok');
+            if (data.audio_base64) {
+              playTipAudio(data.audio_base64);
+            }
           }
           if (data.type === 'pressure_event') {
             state.pressureCount += 1;
@@ -1049,6 +1145,7 @@
           }
           if (data.type === 'session_breakdown') {
             setStatus('Session complete.', 'ok');
+            renderFinalTranscript();
           }
         } catch (error) {
           append('raw', event.data);
@@ -1066,6 +1163,7 @@
         stopBtn.disabled = true;
         micLevel.textContent = '0%';
         visionLevel.textContent = '0%';
+        setSttState('STT idle', 'warn');
         if (state.visionTimer) {
           clearInterval(state.visionTimer);
           state.visionTimer = null;
@@ -1089,6 +1187,7 @@
       } catch (error) {
         append('error', String(error));
       }
+      renderFinalTranscript();
 
       if (state.visionTimer) {
         clearInterval(state.visionTimer);
@@ -1126,6 +1225,21 @@
     });
 
     stopBtn.addEventListener('click', () => stopSession());
+
+    copyTranscriptBtn.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(finalTranscript.value || '');
+        setStatus('Transcript copied to clipboard.', 'ok');
+      } catch (error) {
+        append('error', error.message || String(error));
+      }
+    });
+
+    clearTranscriptBtn.addEventListener('click', () => {
+      state.transcriptParts = [];
+      renderFinalTranscript();
+      setStatus('Transcript cleared.', 'ok');
+    });
 
     append('info', 'Open this page on localhost, click Start session, allow mic + camera, then speak.');
   </script>

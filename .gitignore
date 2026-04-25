@@ -1,0 +1,10 @@
+.venv/
+**/__pycache__/
+**/*.pyc
+
+# Local secrets (use your own .env locally)
+podium/.env
+
+# Scratch
+podium/Untitled
+
