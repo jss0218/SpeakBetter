@@ -24,7 +24,9 @@ from podium.websocket_handler import handle_session
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+# Load .env from podium/ directory
+env_path = Path(__file__).resolve().parent / ".env"
+load_dotenv(dotenv_path=env_path)
 
 app = FastAPI(title="Podium Backend", version="1.0.0")
 BASE_DIR = Path(__file__).resolve().parent

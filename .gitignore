@@ -1,10 +1,64 @@
-.venv/
-**/__pycache__/
-**/*.pyc
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+PIPFILE.lock
 
-# Local secrets (use your own .env locally)
-podium/.env
+# Virtual environments
+.venv
+venv/
+ENV/
+env/
+.env
+.env.local
+.env.*.local
 
-# Scratch
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Project-specific
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+*.pyo
 podium/Untitled
+
+# uAgents
+.uagents/
+*.db
+
+# Node (if frontend gets built later)
+node_modules/
+dist/
+.next/
+
+# OS
+.DS_Store
+Thumbs.db
 
