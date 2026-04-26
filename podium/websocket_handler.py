@@ -71,10 +71,10 @@ async def _handle_transcript_text(session: SessionState, websocket: WebSocket, t
         return
 
     session.pause_detected = False
-    fillers, _ = count_fillers(clean)
+    fillers, filler_words = count_fillers(clean)
     projected_word_count = session.word_count + len(clean.split())
     wpm = calculate_wpm(projected_word_count, session.get_elapsed_seconds())
-    session.add_transcript_chunk(clean, fillers, wpm, session.vocal_energy)
+    session.add_transcript_chunk(clean, fillers, wpm, session.vocal_energy, filler_words)
     payload = TranscriptMessage(
         type="transcript",
         text=clean,
