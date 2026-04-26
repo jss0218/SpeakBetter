@@ -639,6 +639,7 @@ export function LiveSession({
             ? (data.engagement_history as Array<Record<string, unknown>>)
             : [];
           window.setTimeout(() => {
+            recordingUrlRef.current = null; // transfer ownership to caller before cleanup can revoke it
             onEndSession({ breakdown, engagementHistory, recordingUrl });
           }, 400);
         })();

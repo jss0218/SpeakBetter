@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { ImageWithFallback } from './components/figma/ImageWithFallback';
+import { Calibration } from './components/Calibration';
 import { LiveSession } from './components/LiveSession';
 import { SetupFlow } from './components/SetupFlow';
 
-type Screen = 'landing' | 'setup' | 'session' | 'results';
+type Screen = 'landing' | 'setup' | 'calibration' | 'session' | 'results';
 
 interface FeedbackItem {
   timestamp: string;
@@ -203,9 +204,18 @@ export default function App() {
       <SetupFlow
         onStart={(config) => {
           setSessionConfig(config);
-          setCurrentScreen('session');
+          setCurrentScreen('calibration');
         }}
         onBack={() => setCurrentScreen('landing')}
+      />
+    );
+  }
+
+  if (currentScreen === 'calibration') {
+    return (
+      <Calibration
+        onBegin={() => setCurrentScreen('session')}
+        onBack={() => setCurrentScreen('setup')}
       />
     );
   }
