@@ -164,9 +164,9 @@ export default function App() {
         <section className="px-8 py-12 max-w-7xl mx-auto">
           <div className="grid md:grid-cols-3 gap-6">
             {[
-              { stat: '10,000+', label: 'sessions' },
-              { stat: '94%', label: 'confidence improvement' },
-              { stat: 'Real-time', label: 'AI feedback' }
+              { stat: 'Live audience', label: 'AI-driven faces that react to your delivery in real time' },
+              { stat: 'Multi-agent AI', label: 'Speech, vision, and argument analyzed simultaneously' },
+              { stat: 'Full breakdown', label: 'Post-session coaching grounded in your actual performance' }
             ].map((item, i) => (
               <div
                 key={i}
@@ -257,6 +257,7 @@ export default function App() {
         audienceSize={Math.min(20, Math.max(1, sessionConfig.audienceCount))}
         duration={sessionConfig.duration}
         practiceType={sessionConfig.practiceType}
+        colorEngagement={sessionConfig.colorEngagement}
         onEndSession={(result) => {
           setSessionResult(result);
           setChatMessages([]);

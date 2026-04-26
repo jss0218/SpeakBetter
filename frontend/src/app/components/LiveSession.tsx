@@ -67,6 +67,7 @@ interface LiveSessionProps {
   audienceSize?: number;
   duration?: number;
   practiceType: 'pitch' | 'presentation' | 'interview';
+  colorEngagement?: boolean;
   onEndSession: (result: {
     breakdown: Record<string, unknown>;
     engagementHistory: Array<Record<string, unknown>>;
@@ -194,6 +195,7 @@ export function LiveSession({
   audienceSize = 9,
   duration = 5,
   practiceType,
+  colorEngagement = false,
   onEndSession,
 }: LiveSessionProps) {
   const [seconds, setSeconds] = useState(0);
@@ -202,7 +204,7 @@ export function LiveSession({
   const [connectionState, setConnectionState] = useState('Connecting');
   const [micLevel, setMicLevel] = useState(0);
   const [wpm, setWpm] = useState(0);
-  const [engagementScore, setEngagementScore] = useState(0.5);
+  const [engagementScore, setEngagementScore] = useState(0.9);
   const [dominantSignal, setDominantSignal] = useState('--');
   const [questionText, setQuestionText] = useState('Speak for a bit, then stop the session to receive a voiced adversarial question.');
   const [questionPending, setQuestionPending] = useState(false);
@@ -796,7 +798,7 @@ export function LiveSession({
               style={{
                 aspectRatio: '4/3',
                 transform: member.mirrored ? 'scaleX(-1)' : 'none',
-                boxShadow: `0 0 0 3px ${getRingColor(member.avatarState, engagementScore)}`,
+                boxShadow: colorEngagement ? `0 0 0 3px ${getRingColor(member.avatarState, engagementScore)}` : 'none',
                 transition: `box-shadow 1000ms ease, transform 500ms ease`,
               }}
             >
