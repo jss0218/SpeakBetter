@@ -7,6 +7,8 @@ import threading
 from typing import Optional
 from uuid import uuid4
 
+from podium.core.speech import count_fillers
+
 SCENARIOS = {"pitch", "interview", "presentation"}
 
 
@@ -138,7 +140,14 @@ class SessionState:
             else:
                 self.high_engagement_streak = 0
 
-    def add_transcript_chunk(self, text: str, fillers: int, wpm: float, energy: float) -> None:
+    def add_transcript_chunk(
+        self,
+        text: str,
+        fillers: int,
+        wpm: float,
+        energy: float,
+        filler_words: list[str] | None = None,
+    ) -> None:
         clean_text = (text or "").strip()
         if not clean_text:
             return
@@ -154,11 +163,20 @@ class SessionState:
             self.words_per_minute = max(0.0, float(wpm))
             self.vocal_energy = max(0.0, min(1.0, float(energy)))
             self.full_transcript = (self.full_transcript + " " + clean_text).strip()
+            resolved_fillers = max(0, int(fillers))
+            resolved_words: list[str] = []
+            if filler_words is not None:
+                resolved_words = [str(w).strip().lower() for w in filler_words if str(w).strip()]
+            if not resolved_words and resolved_fillers > 0:
+                _, resolved_words = count_fillers(clean_text)
             self.transcript.append(
                 {
                     "text": clean_text,
                     "timestamp": now,
                     "cumulative_fillers": self.filler_count,
+                    "chunk_fillers": resolved_fillers,
+                    "filler_words": resolved_words,
+                    "wpm": float(wpm),
                 }
             )
             self.energy_history.append(self.vocal_energy)

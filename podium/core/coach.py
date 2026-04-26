@@ -66,6 +66,8 @@ Return this exact JSON:
   "argument_feedback": "<feedback on the logical gap that was found>"
 }}
 Include 2-3 high moments and 2-3 low moments minimum.
+Each description must name what actually happened (e.g. specific filler words, WPM range, or dominant_signal)
+and must align with transcript_snippet when you include one.
 """.strip()
 
 ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
@@ -120,102 +122,377 @@ def _snippet(text: str, word_limit: int = 14) -> str:
     return " ".join(words[:word_limit]).strip() + "..."
 
 
+def _nearest_transcript_line(transcript_entries: list[dict], ts: float) -> tuple[float, str]:
+    if not transcript_entries:
+        return ts, ""
+    best = min(
+        transcript_entries,
+        key=lambda e: abs(float(e.get("timestamp", 0.0)) - ts),
+    )
+    return float(best.get("timestamp", ts)), str(best.get("text", "")).strip()
+
+
+def _chunk_filler_meta(entry: dict) -> tuple[int, list[str]]:
+    text = str(entry.get("text", "")).strip()
+    stored = entry.get("chunk_fillers")
+    words = entry.get("filler_words")
+    if isinstance(stored, int) and stored >= 0 and isinstance(words, list):
+        cleaned = [str(w).strip().lower() for w in words if str(w).strip()]
+        return int(stored), cleaned
+    total, found = count_fillers(text)
+    return int(total), list(found)
+
+
+def _format_ts(ts: float) -> str:
+    ts_int = max(0, int(round(float(ts))))
+    mins = ts_int // 60
+    secs = ts_int % 60
+    return f"{mins}:{secs:02d}"
+
+
+def _coalesce_moments(moments: list[dict], *, min_gap_s: float, cap: int) -> list[dict]:
+    chosen: list[dict] = []
+    last_ts: float | None = None
+    for m in sorted(moments, key=lambda x: float(x.get("timestamp_seconds", 0.0))):
+        ts = float(m.get("timestamp_seconds", 0.0))
+        if last_ts is not None and abs(ts - last_ts) < min_gap_s:
+            continue
+        chosen.append(m)
+        last_ts = ts
+        if len(chosen) >= cap:
+            break
+    return chosen
+
+
+def _balanced_select(
+    moments: list[dict],
+    *,
+    min_gap_s: float,
+    cap: int,
+    per_kind_cap: dict[str, int],
+) -> list[dict]:
+    chosen: list[dict] = []
+    chosen_ts: list[float] = []
+    counts: dict[str, int] = {}
+
+    for m in sorted(moments, key=lambda x: float(x.get("timestamp_seconds", 0.0))):
+        ts = float(m.get("timestamp_seconds", 0.0))
+        if any(abs(ts - prev) < min_gap_s for prev in chosen_ts):
+            continue
+        kind = str(m.get("timeline_kind", "") or "")
+        limit = per_kind_cap.get(kind, per_kind_cap.get("*", cap))
+        if counts.get(kind, 0) >= limit:
+            continue
+        chosen.append(m)
+        chosen_ts.append(ts)
+        counts[kind] = counts.get(kind, 0) + 1
+        if len(chosen) >= cap:
+            break
+
+    return chosen
+
+
+def _shorten(text: str, max_chars: int = 150) -> str:
+    s = " ".join(str(text or "").split()).strip()
+    if len(s) <= max_chars:
+        return s
+    return s[: max(0, max_chars - 1)].rstrip() + "…"
+
+
 def _build_fallback_moments(session_snapshot: dict) -> tuple[list[dict], list[dict]]:
     transcript_entries = [
-        entry for entry in session_snapshot.get("transcript", [])
+        entry
+        for entry in session_snapshot.get("transcript", [])
         if isinstance(entry, dict) and str(entry.get("text", "")).strip()
     ]
     engagement_history = [
-        entry for entry in session_snapshot.get("engagement_history", [])
-        if isinstance(entry, dict)
+        entry for entry in session_snapshot.get("engagement_history", []) if isinstance(entry, dict)
+    ]
+    vision_history = [
+        entry for entry in session_snapshot.get("vision_history", []) if isinstance(entry, dict)
     ]
 
-    high_moments: list[dict] = []
     low_moments: list[dict] = []
+    seen_low: set[tuple] = set()
 
-    for entry in engagement_history:
-        score = float(entry.get("score", 0.0))
-        timestamp = float(entry.get("timestamp", 0.0))
-        signal = str(entry.get("dominant_signal", "")).strip()
-        if score >= 0.7 and len(high_moments) < 2:
-            high_moments.append(
-                {
-                    "timestamp_seconds": round(timestamp, 1),
-                    "description": f"Audience engagement climbed during {signal.replace('_', ' ') or 'a strong section'}.",
-                    "transcript_snippet": "",
-                }
-            )
-        elif score <= 0.42 and len(low_moments) < 2:
-            low_moments.append(
-                {
-                    "timestamp_seconds": round(timestamp, 1),
-                    "description": f"Engagement dropped during {signal.replace('_', ' ') or 'a weaker stretch'}.",
-                    "transcript_snippet": "",
-                }
-            )
+    ignore_low_signal_fillers = {
+        "so",
+        "right",
+        "okay so",
+        "okay",
+    }
+    high_signal_fillers = {
+        "um",
+        "uh",
+        "umm",
+        "uhhh",
+        "like",
+        "you know",
+        "i mean",
+        "basically",
+        "literally",
+        "kind of",
+        "sort of",
+        "actually",
+    }
 
+    last_low_at: float | None = None
     for entry in transcript_entries:
         text = str(entry.get("text", "")).strip()
-        timestamp = float(entry.get("timestamp", 0.0))
-        cumulative_fillers = int(entry.get("cumulative_fillers", 0))
-        lowered = text.lower()
+        ts = float(entry.get("timestamp", 0.0))
+        if last_low_at is not None and ts - last_low_at < 6.0:
+            continue
+        n_fill, filler_words = _chunk_filler_meta(entry)
+        if n_fill <= 0:
+            continue
+        ordered = list(dict.fromkeys(filler_words))
+        # Avoid spamming low-signal fillers like "so" unless there's something stronger too,
+        # or the chunk had multiple fillers.
+        if ordered and all(w in ignore_low_signal_fillers for w in ordered) and n_fill < 2:
+            continue
+        if ordered and not any(w in high_signal_fillers for w in ordered) and n_fill < 2:
+            continue
+        label = ", ".join(ordered) if ordered else "filler word(s)"
+        snippet = _snippet(text, 16)
+        desc = f'{_format_ts(ts)} — Used {label}. "{snippet}"'
+        key = (round(ts, 1), "filler")
+        if key in seen_low:
+            continue
+        seen_low.add(key)
+        low_moments.append(
+            {
+                "timestamp_seconds": round(ts, 1),
+                "description": desc,
+                "transcript_snippet": snippet,
+                "timeline_kind": "filler",
+            }
+        )
+        last_low_at = ts
+        if len(low_moments) >= 4:
+            break
 
-        if len(high_moments) < 3 and len(text.split()) >= 8 and cumulative_fillers <= 2:
-            high_moments.append(
-                {
-                    "timestamp_seconds": round(timestamp, 1),
-                    "description": "Clear, sustained delivery landed well here.",
-                    "transcript_snippet": _snippet(text),
-                }
-            )
+    for entry in sorted(engagement_history, key=lambda e: float(e.get("score", 0.0))):
+        if len(low_moments) >= 6:
+            break
+        score = float(entry.get("score", 0.0))
+        if score > 0.44:
+            continue
+        ts = float(entry.get("timestamp", 0.0))
+        if any(abs(ts - float(m.get("timestamp_seconds", 0.0))) < 8.0 for m in low_moments):
+            continue
+        signal = str(entry.get("dominant_signal", "")).strip().replace("_", " ") or "delivery"
+        nts, line = _nearest_transcript_line(transcript_entries, ts)
+        snippet = _snippet(line, 14) if line else ""
+        desc = f"{_format_ts(nts)} — Engagement dipped (~{int(round(score * 100))}%, {signal})."
+        if snippet:
+            desc += f' "{snippet}"'
+        key = (round(ts, 1), "eng_low")
+        if key in seen_low:
+            continue
+        seen_low.add(key)
+        low_moments.append(
+            {
+                "timestamp_seconds": round(nts, 1),
+                "description": desc,
+                "transcript_snippet": snippet,
+                "timeline_kind": "engagement",
+            }
+        )
 
-        if len(low_moments) < 3 and (
-            any(token in lowered for token in [" um ", " uh ", " like ", " you know ", " i mean "])
-            or len(text.split()) <= 4
-        ):
-            low_moments.append(
-                {
-                    "timestamp_seconds": round(timestamp, 1),
-                    "description": "This section sounded less polished and likely weakened momentum.",
-                    "transcript_snippet": _snippet(text),
-                }
-            )
+    high_moments: list[dict] = []
+    seen_high: set[tuple] = set()
 
-        if len(high_moments) >= 3 and len(low_moments) >= 3:
+    last_high_at: float | None = None
+    for entry in transcript_entries:
+        text = str(entry.get("text", "")).strip()
+        ts = float(entry.get("timestamp", 0.0))
+        if last_high_at is not None and ts - last_high_at < 10.0:
+            continue
+        words = text.split()
+        if len(words) < 6:
+            continue
+        n_fill, _ = _chunk_filler_meta(entry)
+        if n_fill > 0:
+            continue
+        wpm_val = float(entry.get("wpm", 0.0) or 0.0)
+        if not (112.0 <= wpm_val <= 168.0):
+            continue
+        snippet = _snippet(text, 16)
+        desc = f'{_format_ts(ts)} — Clean pace (~{int(round(wpm_val))} WPM), no fillers. "{snippet}"'
+        key = (round(ts, 1), "pace")
+        if key in seen_high:
+            continue
+        seen_high.add(key)
+        high_moments.append(
+            {
+                "timestamp_seconds": round(ts, 1),
+                "description": desc,
+                "transcript_snippet": snippet,
+                "timeline_kind": "pace",
+            }
+        )
+        last_high_at = ts
+        if len(high_moments) >= 2:
+            break
+
+    for entry in sorted(engagement_history, key=lambda e: -float(e.get("score", 0.0))):
+        if len(high_moments) >= 4:
+            break
+        score = float(entry.get("score", 0.0))
+        if score < 0.7:
+            continue
+        ts = float(entry.get("timestamp", 0.0))
+        if any(abs(ts - float(m.get("timestamp_seconds", 0.0))) < 10.0 for m in high_moments):
+            continue
+        signal = str(entry.get("dominant_signal", "")).strip().replace("_", " ") or "delivery"
+        nts, line = _nearest_transcript_line(transcript_entries, ts)
+        snippet = _snippet(line, 14) if line else ""
+        desc = f"{_format_ts(nts)} — Engagement peaked (~{int(round(score * 100))}%, {signal})."
+        if snippet:
+            desc += f' "{snippet}"'
+        key = (round(ts, 1), "eng_high")
+        if key in seen_high:
+            continue
+        seen_high.add(key)
+        high_moments.append(
+            {
+                "timestamp_seconds": round(nts, 1),
+                "description": desc,
+                "transcript_snippet": snippet,
+                "timeline_kind": "engagement",
+            }
+        )
+
+    eye_added = 0
+    for entry in sorted(vision_history, key=lambda e: -float(e.get("eye_contact", 0.0) or 0.0)):
+        if len(high_moments) >= 5:
+            break
+        if not bool(entry.get("face_detected", False)):
+            continue
+        eye = float(entry.get("eye_contact", 0.0) or 0.0)
+        if eye < 0.85:
+            continue
+        ts = float(entry.get("timestamp", 0.0))
+        if any(abs(ts - float(m.get("timestamp_seconds", 0.0))) < 10.0 for m in high_moments):
+            continue
+        nts, line = _nearest_transcript_line(transcript_entries, ts)
+        # Only surface eye-contact moments when there's a real spoken beat nearby
+        # (otherwise we get lots of tiny fragments like "oh yeah").
+        if len((line or "").split()) < 6:
+            continue
+        snippet = _snippet(line, 14) if line else ""
+        desc = f"{_format_ts(nts)} — Eye contact strong (~{int(round(eye * 100))}%)."
+        if snippet:
+            desc += f' "{snippet}"'
+        key = (round(ts, 1), "eye")
+        if key in seen_high:
+            continue
+        seen_high.add(key)
+        high_moments.append(
+            {
+                "timestamp_seconds": round(nts, 1),
+                "description": desc,
+                "transcript_snippet": snippet,
+                "timeline_kind": "eye_contact",
+            }
+        )
+        eye_added += 1
+        if eye_added >= 1:
             break
 
     if not high_moments and transcript_entries:
         first = transcript_entries[0]
+        t0 = float(first.get("timestamp", 0.0))
+        tx = str(first.get("text", "")).strip()
         high_moments.append(
             {
-                "timestamp_seconds": round(float(first.get("timestamp", 0.0)), 1),
-                "description": "You established the session with a usable opening.",
-                "transcript_snippet": _snippet(str(first.get("text", ""))),
+                "timestamp_seconds": round(t0, 1),
+                "description": f'Opening beat: "{_snippet(tx, 22)}"',
+                "transcript_snippet": _snippet(tx, 22),
+                "timeline_kind": "pace",
             }
         )
 
     if not low_moments and transcript_entries:
         last = transcript_entries[-1]
+        t1 = float(last.get("timestamp", 0.0))
+        tx = str(last.get("text", "")).strip()
         low_moments.append(
             {
-                "timestamp_seconds": round(float(last.get("timestamp", 0.0)), 1),
-                "description": "The close still needed sharper evidence and cleaner phrasing.",
-                "transcript_snippet": _snippet(str(last.get("text", ""))),
+                "timestamp_seconds": round(t1, 1),
+                "description": f'Last stretch to review: "{_snippet(tx, 22)}"',
+                "transcript_snippet": _snippet(tx, 22),
+                "timeline_kind": "pace",
             }
         )
 
-    def dedupe(moments: list[dict]) -> list[dict]:
-        seen: set[tuple[int, str]] = set()
+    def dedupe_sorted(moments: list[dict], cap: int) -> list[dict]:
+        seen_keys: set[tuple] = set()
         cleaned: list[dict] = []
-        for moment in moments:
-            key = (int(float(moment.get("timestamp_seconds", 0.0))), str(moment.get("description", "")))
-            if key in seen:
+        for moment in sorted(
+            moments,
+            key=lambda m: float(m.get("timestamp_seconds", 0.0)),
+        ):
+            tsf = round(float(moment.get("timestamp_seconds", 0.0)), 1)
+            kind = str(moment.get("timeline_kind", "") or "")
+            snip = str(moment.get("transcript_snippet", "") or "")[:24]
+            key = (tsf, kind, snip)
+            if key in seen_keys:
                 continue
-            seen.add(key)
+            seen_keys.add(key)
             cleaned.append(moment)
-        return cleaned[:3]
+            if len(cleaned) >= cap:
+                break
+        return cleaned
 
-    return dedupe(high_moments), dedupe(low_moments)
+    highs = dedupe_sorted(high_moments, 20)
+    lows = dedupe_sorted(low_moments, 26)
+    highs = _balanced_select(
+        highs,
+        min_gap_s=8.0,
+        cap=10,
+        per_kind_cap={
+            "pace": 4,
+            "engagement": 4,
+            "eye_contact": 2,
+            "*": 3,
+        },
+    )
+    lows = _balanced_select(
+        lows,
+        min_gap_s=6.0,
+        cap=12,
+        per_kind_cap={
+            "filler": 7,
+            "engagement": 5,
+            "*": 4,
+        },
+    )
+    for m in highs + lows:
+        if isinstance(m, dict) and "description" in m:
+            m["description"] = _shorten(str(m.get("description", "")), 170)
+    return highs, lows
+
+
+_GENERIC_MOMENT_PHRASES = (
+    "clear, sustained delivery landed well here",
+    "this section sounded less polished",
+)
+
+
+def _enrich_moment_descriptions(moments: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for moment in moments:
+        if not isinstance(moment, dict):
+            continue
+        m = dict(moment)
+        desc = str(m.get("description", "")).strip()
+        snip = str(m.get("transcript_snippet", "")).strip()
+        dlow = desc.lower()
+        if snip and any(p in dlow for p in _GENERIC_MOMENT_PHRASES):
+            m["description"] = f'{desc} Evidence from your transcript: "{_snippet(snip, 20)}"'
+        out.append(m)
+    return out
 
 
 def _normalize_breakdown(parsed: dict, session_snapshot: dict) -> dict:
@@ -239,6 +516,17 @@ def _normalize_breakdown(parsed: dict, session_snapshot: dict) -> dict:
         normalized["next_session_focus"] = fallback["next_session_focus"]
     if not normalized.get("argument_feedback"):
         normalized["argument_feedback"] = fallback["argument_feedback"]
+
+    hm_final = normalized.get("high_moments")
+    lm_final = normalized.get("low_moments")
+    if isinstance(hm_final, list):
+        normalized["high_moments"] = _enrich_moment_descriptions(
+            [dict(x) for x in hm_final if isinstance(x, dict)]
+        )
+    if isinstance(lm_final, list):
+        normalized["low_moments"] = _enrich_moment_descriptions(
+            [dict(x) for x in lm_final if isinstance(x, dict)]
+        )
 
     try:
         normalized["overall_score"] = int(max(0, min(100, round(float(normalized.get("overall_score", fallback["overall_score"]))))))
