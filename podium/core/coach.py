@@ -37,7 +37,6 @@ Session data:
 - Average WPM: {avg_wpm}
 - Average eye contact score: {avg_eye_contact}
 - Argument gap identified: {weakest_claim}
-- Pressure events that fired: {pressure_events}
 
 Return this exact JSON:
 {{
@@ -177,9 +176,6 @@ async def generate_session_breakdown(session_snapshot: dict) -> dict:
         avg_wpm=round(float(session_snapshot.get("words_per_minute", 0.0)), 2),
         avg_eye_contact=round(float(session_snapshot.get("eye_contact_score", 0.0)), 3),
         weakest_claim=session_snapshot.get("weakest_claim", ""),
-        pressure_events=json.dumps(
-            session_snapshot.get("pressure_events_fired", []), ensure_ascii=True
-        ),
     )
 
     raw = await call_groq(
@@ -206,7 +202,7 @@ def fallback_breakdown(session_snapshot: dict) -> dict:
 
     strengths.append("Maintained composure through the session")
     strengths.append("Completed the speaking run with full transcript coverage")
-    strengths.append("Handled dynamic audience pressure events")
+    strengths.append("Sustained a complete speaking run from start to finish")
 
     if filler_count > 15:
         improvements.append("Reduce filler words — use deliberate pauses instead")

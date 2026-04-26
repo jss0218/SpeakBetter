@@ -59,12 +59,6 @@ class CoachTipMessage(BaseModel):
     audio_base64: Optional[str] = None
 
 
-class PressureEventMessage(BaseModel):
-    type: Literal["pressure_event"]
-    event: str
-    payload: dict
-
-
 class QAQuestionMessage(BaseModel):
     type: Literal["qa_question"]
     question: str

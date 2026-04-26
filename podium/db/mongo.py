@@ -125,7 +125,7 @@ async def update_stress_signature(user_id: str, new_session: dict) -> None:
 
     filler_rates = [float(s.get("filler_rate", 0.0)) for s in sessions[:3]]
     if min(filler_rates) > 4.0:
-        patterns.append("filler_rate_remains_high_under_pressure")
+        patterns.append("filler_rate_remains_high")
 
     eye_drop_correlation_hits = 0
     for sess in sessions[:3]:

@@ -49,9 +49,6 @@ class SessionState:
     avatar_stubbornness: dict[str, float] = field(default_factory=dict)
     audience_size: int = 8
 
-    pressure_level: int = 1
-    pressure_events_fired: list[str] = field(default_factory=list)
-
     claims: list[str] = field(default_factory=list)
     weakest_claim: str = ""
     gap_explanation: str = ""
@@ -154,14 +151,6 @@ class SessionState:
             if len(self.gesture_history) > 60:
                 self.gesture_history = self.gesture_history[-60:]
 
-    def fire_pressure_event(self, event_name: str) -> None:
-        with self._lock:
-            self.pressure_events_fired.append(event_name)
-            if event_name in {"audience_size_increase", "distraction_inject"}:
-                self.pressure_level = max(self.pressure_level, 2)
-            elif event_name in {"timer_appear", "hand_raise"}:
-                self.pressure_level = max(self.pressure_level, 3)
-
     def get_snapshot(self) -> dict:
         with self._lock:
             return {
@@ -215,8 +204,6 @@ class SessionState:
                 "avatar_states": dict(self.avatar_states),
                 "avatar_stubbornness": dict(self.avatar_stubbornness),
                 "audience_size": self.audience_size,
-                "pressure_level": self.pressure_level,
-                "pressure_events_fired": list(self.pressure_events_fired),
                 "claims": list(self.claims),
                 "weakest_claim": self.weakest_claim,
                 "gap_explanation": self.gap_explanation,

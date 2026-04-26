@@ -693,10 +693,6 @@
             <div class="label">Audience updates</div>
             <div class="value" id="audienceCount">0</div>
           </div>
-          <div class="mini">
-            <div class="label">Pressure events</div>
-            <div class="value" id="pressureCount">0</div>
-          </div>
         </div>
 
         <div class="hint">
@@ -767,8 +763,6 @@
     const transcriptCount = el('transcriptCount');
     const tipCount = el('tipCount');
     const audienceCount = el('audienceCount');
-    const pressureCount = el('pressureCount');
-
     const finalTranscript = el('finalTranscript');
     const copyTranscriptBtn = el('copyTranscriptBtn');
     const clearTranscriptBtn = el('clearTranscriptBtn');
@@ -793,7 +787,6 @@
       transcriptCount: 0,
       tipCount: 0,
       audienceCount: 0,
-      pressureCount: 0,
       lastVisionPayload: null,
       lastEngagement: null,
       demoAngle: 0,
@@ -1207,10 +1200,6 @@
             if (data.audio_base64) {
               playTipAudio(data.audio_base64);
             }
-          }
-          if (data.type === 'pressure_event') {
-            state.pressureCount += 1;
-            pressureCount.textContent = String(state.pressureCount);
           }
           if (data.type === 'session_breakdown') {
             setStatus('Session complete.', 'ok');

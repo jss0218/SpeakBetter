@@ -14,7 +14,6 @@ from podium.agents.argument_agent import argument_agent
 from podium.agents.audience_agent import audience_agent
 from podium.agents.coach_agent import coach_agent
 from podium.agents.fusion_agent import fusion_agent
-from podium.agents.pressure_agent import pressure_agent
 from podium.agents.speech_agent import speech_agent
 from podium.agents.vision_agent import vision_agent
 from podium.db.mongo import connect, disconnect
@@ -68,7 +67,6 @@ async def on_startup() -> None:
         fusion_agent,
         audience_agent,
         argument_agent,
-        pressure_agent,
     ]:
         logger.info("Agent ready: %s (%s)", agent.name, agent.address)
 
@@ -95,7 +93,6 @@ async def health() -> dict:
             {"name": fusion_agent.name, "address": fusion_agent.address},
             {"name": audience_agent.name, "address": audience_agent.address},
             {"name": argument_agent.name, "address": argument_agent.address},
-            {"name": pressure_agent.name, "address": pressure_agent.address},
         ],
     }
 

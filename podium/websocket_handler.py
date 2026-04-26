@@ -19,7 +19,6 @@ from podium.core.audience import calculate_avatar_states, expand_audience
 from podium.core.coach import generate_realtime_tip, generate_session_breakdown, voice_tip
 from podium.core.elevenlabs_stt import transcribe_pcm_s16le_16k_mono
 from podium.core.fusion import calculate_engagement, calculate_trend
-from podium.core.pressure import check_pressure_events
 from podium.core.speech import calculate_wpm, count_fillers, normalize_amplitude
 from podium.db.mongo import save_session
 from podium.schemas import (
@@ -28,7 +27,6 @@ from podium.schemas import (
     ConnectedMessage,
     EngagementUpdateMessage,
     ErrorMessage,
-    PressureEventMessage,
     QAQuestionMessage,
     SessionBreakdownMessage,
     TranscriptMessage,
@@ -298,52 +296,6 @@ async def argument_loop(session: SessionState, websocket: WebSocket, stop_event:
         await asyncio.sleep(45)
 
 
-async def pressure_loop(
-    session: SessionState,
-    websocket: WebSocket,
-    stop_event: asyncio.Event,
-    runtime_state: dict[str, Any],
-) -> None:
-    while not stop_event.is_set() and session.ended_at is None:
-        try:
-            events = check_pressure_events(
-                pressure_events_fired=session.pressure_events_fired,
-                high_engagement_streak=session.high_engagement_streak,
-                elapsed_seconds=session.get_elapsed_seconds(),
-                target_duration=session.target_duration,
-                audience_size=session.audience_size,
-                avatar_states=session.avatar_states,
-                last_distraction_time=runtime_state.get("last_distraction_time", 0.0),
-            )
-            for item in events:
-                event_name = item.get("event", "")
-                payload = item.get("payload", {})
-                if not event_name:
-                    continue
-
-                session.fire_pressure_event(event_name)
-                if event_name == "audience_size_increase":
-                    new_size = int(payload.get("to", session.audience_size))
-                    states, stubbornness = expand_audience(
-                        current_states=session.avatar_states,
-                        stubbornness_factors=session.avatar_stubbornness,
-                        new_size=new_size,
-                        current_engagement=session.engagement_score,
-                    )
-                    session.audience_size = new_size
-                    session.avatar_states = states
-                    session.avatar_stubbornness = stubbornness
-                elif event_name == "distraction_inject":
-                    runtime_state["last_distraction_time"] = session.get_elapsed_seconds()
-
-                outbound = PressureEventMessage(type="pressure_event", event=event_name, payload=payload)
-                await _safe_send_json(websocket, outbound.model_dump())
-        except Exception as exc:
-            logger.exception("pressure_loop failed: %s", exc)
-
-        await asyncio.sleep(5)
-
-
 async def handle_session_end(
     session: SessionState,
     websocket: WebSocket,
@@ -433,8 +385,6 @@ async def handle_session(websocket: WebSocket, session_id: str, session: Session
     stop_event = asyncio.Event()
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
     qa_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=2)
-    runtime_state: dict[str, Any] = {"last_distraction_time": 0.0}
-
     connected = ConnectedMessage(type="connected", session_id=session.session_id, config=session.get_snapshot())
     await _safe_send_json(websocket, connected.model_dump())
 
@@ -443,7 +393,6 @@ async def handle_session(websocket: WebSocket, session_id: str, session: Session
         asyncio.create_task(fusion_loop(session, websocket, stop_event)),
         asyncio.create_task(coach_loop(session, websocket, stop_event)),
         asyncio.create_task(argument_loop(session, websocket, stop_event)),
-        asyncio.create_task(pressure_loop(session, websocket, stop_event, runtime_state)),
     ]
 
     try:
