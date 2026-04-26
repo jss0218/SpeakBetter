@@ -15,8 +15,8 @@ from podium.core.argument import (
     generate_followup_question,
     synthesize_question_audio,
 )
-from podium.core.audience import calculate_avatar_states, expand_audience
-from podium.core.coach import generate_realtime_tip, generate_session_breakdown, voice_tip
+from podium.core.audience import calculate_avatar_states
+from podium.core.coach import generate_realtime_tip, generate_session_breakdown, generate_vision_tip, voice_tip
 from podium.core.elevenlabs_stt import transcribe_pcm_s16le_16k_mono
 from podium.core.fusion import calculate_engagement, calculate_trend
 from podium.core.speech import calculate_wpm, count_fillers, normalize_amplitude
@@ -30,6 +30,7 @@ from podium.schemas import (
     QAQuestionMessage,
     SessionBreakdownMessage,
     TranscriptMessage,
+    VisionCalibrationMessage,
     VisionUpdateMessage,
 )
 from podium.session import SessionState
@@ -130,6 +131,7 @@ async def handle_elevenlabs_stt_stream(
         request_every_s = 1.25
         window_s = 6.0
         max_buffer_s = 12.0
+        recent_energy: list[float] = []
 
         min_bytes = int(bytes_per_second * min_window_s)
         window_bytes = int(bytes_per_second * window_s)
@@ -146,6 +148,9 @@ async def handle_elevenlabs_stt_stream(
 
             energy = normalize_amplitude(_extract_pcm16_energy(chunk), session.energy_history)
             session.vocal_energy = energy
+            recent_energy.append(energy)
+            if len(recent_energy) > 12:
+                recent_energy = recent_energy[-12:]
 
             # Always buffer audio; STT will be skipped if key isn't set.
             if chunk:
@@ -158,6 +163,9 @@ async def handle_elevenlabs_stt_stream(
             if now - last_request_at < request_every_s:
                 continue
             if len(pcm_buffer) < min_bytes:
+                continue
+            if recent_energy and max(recent_energy) < 0.01:
+                session.pause_detected = True
                 continue
             last_request_at = now
 
@@ -201,7 +209,26 @@ async def handle_vision_update(msg: dict, session: SessionState) -> None:
         eye_contact=parsed.eye_contact,
         face_detected=parsed.face_detected,
         gesture=parsed.gesture_detected,
+        posture_score=parsed.posture_score,
+        motion_score=parsed.motion_score,
+        brow_furrow=parsed.brow_furrow,
+        smile_score=parsed.smile_score,
+        expression=parsed.expression,
+        head_yaw=parsed.head_yaw,
+        head_pitch=parsed.head_pitch,
+        head_roll=parsed.head_roll,
+        face_size=parsed.face_size,
+        hand_motion=parsed.hand_motion,
+        vision_confidence=parsed.vision_confidence,
     )
+
+
+async def handle_vision_calibration(msg: dict, session: SessionState) -> None:
+    try:
+        parsed = VisionCalibrationMessage(**msg)
+    except Exception:
+        return
+    session.update_vision_calibration(parsed.samples)
 
 
 async def audience_update(session: SessionState, websocket: WebSocket) -> None:
@@ -227,6 +254,12 @@ async def fusion_loop(session: SessionState, websocket: WebSocket, stop_event: a
         try:
             score, dominant_signal, components = calculate_engagement(
                 eye_contact_score=session.eye_contact_score,
+                posture_score=session.posture_score,
+                gesture_score=session.gesture_score,
+                motion_score=session.motion_score,
+                brow_furrow=session.brow_furrow,
+                smile_score=session.smile_score,
+                expression=session.expression,
                 filler_rate=session.filler_rate,
                 words_per_minute=session.words_per_minute,
                 vocal_energy=session.vocal_energy,
@@ -234,6 +267,8 @@ async def fusion_loop(session: SessionState, websocket: WebSocket, stop_event: a
                 elapsed_seconds=session.get_elapsed_seconds(),
                 energy_history=session.energy_history,
                 engagement_history=session.engagement_history,
+                delivery_events=session.delivery_events,
+                vision_confidence=session.vision_confidence,
             )
             trend = calculate_trend(session.engagement_history + [{"score": score}])
             session.update_engagement(score=score, signal=dominant_signal, trend=trend)
@@ -277,6 +312,29 @@ async def coach_loop(session: SessionState, websocket: WebSocket, stop_event: as
             logger.exception("coach_loop failed: %s", exc)
 
         await asyncio.sleep(30)
+
+
+async def vision_coach_loop(session: SessionState, websocket: WebSocket, stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set() and session.ended_at is None:
+        try:
+            now = session.get_elapsed_seconds()
+            if now - float(session.last_tip_timestamp) >= 12:
+                tip, signal = generate_vision_tip(
+                    recent_vision=session.get_recent_vision(10),
+                    last_signal=session.last_vision_tip_signal,
+                    delivery_events=session.delivery_events,
+                    vision_confidence=session.vision_confidence,
+                )
+                session.last_vision_tip_signal = signal
+                if tip:
+                    session.coach_tips.append({"tip": tip, "timestamp": now, "source": "vision"})
+                    session.last_tip_timestamp = now
+                    payload = CoachTipMessage(type="coach_tip", tip=tip, audio_base64=None)
+                    await _safe_send_json(websocket, payload.model_dump())
+        except Exception as exc:
+            logger.exception("vision_coach_loop failed: %s", exc)
+
+        await asyncio.sleep(2)
 
 
 async def argument_loop(session: SessionState, websocket: WebSocket, stop_event: asyncio.Event) -> None:
@@ -329,11 +387,6 @@ async def handle_session_end(
     if question:
         elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
         audio_base64 = await synthesize_question_audio(question, elevenlabs_key)
-        logger.info(
-            "Sending QA question to client: has_audio=%s question_length=%s",
-            bool(audio_base64),
-            len(question),
-        )
         qa_msg = QAQuestionMessage(type="qa_question", question=question, audio_base64=audio_base64)
         await _safe_send_json(websocket, qa_msg.model_dump())
 
@@ -385,6 +438,7 @@ async def handle_session(websocket: WebSocket, session_id: str, session: Session
     stop_event = asyncio.Event()
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
     qa_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=2)
+
     connected = ConnectedMessage(type="connected", session_id=session.session_id, config=session.get_snapshot())
     await _safe_send_json(websocket, connected.model_dump())
 
@@ -392,6 +446,7 @@ async def handle_session(websocket: WebSocket, session_id: str, session: Session
     tasks = [
         asyncio.create_task(fusion_loop(session, websocket, stop_event)),
         asyncio.create_task(coach_loop(session, websocket, stop_event)),
+        asyncio.create_task(vision_coach_loop(session, websocket, stop_event)),
         asyncio.create_task(argument_loop(session, websocket, stop_event)),
     ]
 
@@ -422,6 +477,8 @@ async def handle_session(websocket: WebSocket, session_id: str, session: Session
             msg_type = msg.get("type")
             if msg_type == "vision_update":
                 await handle_vision_update(msg, session)
+            elif msg_type == "vision_calibration":
+                await handle_vision_calibration(msg, session)
             elif msg_type == "session_end":
                 await handle_session_end(session, websocket, tasks, qa_queue, stop_event)
                 break

@@ -11,6 +11,23 @@ class VisionUpdateMessage(BaseModel):
     face_detected: bool
     gesture_detected: bool
     timestamp: float
+    posture_score: float = Field(default=0.5, ge=0.0, le=1.0)
+    motion_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    brow_furrow: float = Field(default=0.0, ge=0.0, le=1.0)
+    smile_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    expression: str = "neutral"
+    head_yaw: float = 0.0
+    head_pitch: float = 0.0
+    head_roll: float = 0.0
+    face_size: float = Field(default=0.0, ge=0.0)
+    hand_motion: float = Field(default=0.0, ge=0.0, le=1.0)
+    vision_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class VisionCalibrationMessage(BaseModel):
+    type: Literal["vision_calibration"]
+    samples: list[dict]
+    timestamp: float
 
 
 class SessionEndMessage(BaseModel):
@@ -57,6 +74,12 @@ class CoachTipMessage(BaseModel):
     type: Literal["coach_tip"]
     tip: str
     audio_base64: Optional[str] = None
+
+
+class PressureEventMessage(BaseModel):
+    type: Literal["pressure_event"]
+    event: str
+    payload: dict
 
 
 class QAQuestionMessage(BaseModel):

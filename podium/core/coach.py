@@ -36,7 +36,12 @@ Session data:
 - Total filler words: {filler_count}
 - Average WPM: {avg_wpm}
 - Average eye contact score: {avg_eye_contact}
+- Average posture score: {avg_posture}
+- Gesture score: {gesture_score}
+- Motion balance score: {motion_score}
+- Facial expression: {expression}
 - Argument gap identified: {weakest_claim}
+- Pressure events that fired: {pressure_events}
 
 Return this exact JSON:
 {{
@@ -66,45 +71,28 @@ Include 2-3 high moments and 2-3 low moments minimum.
 ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
 
-async def call_groq(
-    prompt: str,
-    timeout_seconds: float = 10.0,
-    *,
-    temperature: float = 0.7,
-    max_output_tokens: int = 1024,
-) -> str | None:
-    api_key = os.getenv("GROQ_API_KEY", "")
-    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
+async def call_gemini(prompt: str, timeout_seconds: float = 10.0) -> str | None:
+    api_key = os.getenv("GEMINI_API_KEY", "")
     if not api_key:
-        logger.warning("GROQ_API_KEY not set")
+        logger.warning("GEMINI_API_KEY not set")
         return None
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
     payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": temperature,
-        "max_tokens": max_output_tokens,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
     }
 
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            response = await client.post(url, headers=headers, json=payload)
+            response = await client.post(url, json=payload)
         if response.status_code != 200:
-            logger.warning("Groq non-200: %s %s", response.status_code, response.text)
+            logger.warning("Gemini non-200: %s %s", response.status_code, response.text)
             return None
         data = response.json()
-        choices = data.get("choices", [])
-        if not choices:
-            return None
-        message = choices[0].get("message", {})
-        return str(message.get("content", "")).strip() or None
+        return data["candidates"][0]["content"]["parts"][0]["text"]
     except Exception as exc:
-        logger.warning("Groq call failed: %s", exc)
+        logger.warning("Gemini call failed: %s", exc)
         return None
 
 
@@ -146,11 +134,66 @@ async def generate_realtime_tip(
         recent_fillers=", ".join(filler_words) if filler_words else "none",
     )
 
-    raw = await call_groq(prompt=prompt, timeout_seconds=3, max_output_tokens=128)
+    raw = await call_gemini(prompt=prompt, timeout_seconds=3)
     tip = (raw or "").strip()
     if not tip:
         return None
     return " ".join(tip.split())
+
+
+def generate_vision_tip(
+    recent_vision: list[dict],
+    last_signal: str = "",
+    delivery_events: list[dict] | None = None,
+    vision_confidence: float = 1.0,
+) -> tuple[str | None, str]:
+    delivery_events = delivery_events or []
+    if delivery_events and vision_confidence >= 0.4:
+        event = delivery_events[0]
+        signal = str(event.get("name", ""))
+        tip = str(event.get("tip", "")).strip()
+        if tip and signal != last_signal:
+            return tip, signal
+        return None, last_signal
+
+    if len(recent_vision) < 8:
+        return None, last_signal
+
+    face_samples = [entry for entry in recent_vision if entry.get("face_detected")]
+    if len(face_samples) < max(4, len(recent_vision) // 2):
+        signal = "no_face"
+        if signal != last_signal:
+            return "Step back into frame so the audience can read you.", signal
+        return None, last_signal
+
+    count = len(face_samples)
+    avg_eye = sum(float(entry.get("eye_contact", 0.5)) for entry in face_samples) / count
+    avg_posture = sum(float(entry.get("posture_score", 0.5)) for entry in face_samples) / count
+    avg_motion = sum(float(entry.get("motion_score", 0.0)) for entry in face_samples) / count
+    avg_brow = sum(float(entry.get("brow_furrow", 0.0)) for entry in face_samples) / count
+    gesture_rate = sum(1 for entry in face_samples if entry.get("gesture_detected")) / count
+
+    candidates: list[tuple[str, str, float]] = []
+    if avg_eye < 0.4:
+        candidates.append(("low_eye_contact", "Look up from your notes and address the camera.", 0.4 - avg_eye))
+    if avg_posture < 0.45:
+        candidates.append(("poor_posture", "Straighten your shoulders and plant your stance.", 0.45 - avg_posture))
+    if gesture_rate < 0.08:
+        candidates.append(("stiff_gestures", "Use one deliberate hand gesture on your next point.", 0.08 - gesture_rate))
+    elif gesture_rate > 0.75:
+        candidates.append(("excessive_gestures", "Quiet your hands and hold still between points.", gesture_rate - 0.75))
+    if avg_motion > 0.55:
+        candidates.append(("fidgeting", "Reduce the swaying; reset your feet before continuing.", avg_motion - 0.55))
+    if avg_brow > 0.55:
+        candidates.append(("tense_expression", "Relax your brow so confidence shows on your face.", avg_brow - 0.55))
+
+    if not candidates:
+        return None, ""
+
+    signal, tip, _ = max(candidates, key=lambda item: item[2])
+    if signal == last_signal:
+        return None, last_signal
+    return tip, signal
 
 
 async def generate_session_breakdown(session_snapshot: dict) -> dict:
@@ -167,7 +210,7 @@ async def generate_session_breakdown(session_snapshot: dict) -> dict:
     )
 
     prompt = BREAKDOWN_PROMPT.format(
-        scenario=session_snapshot.get("scenario", "pitch"),
+        scenario=session_snapshot.get("scenario", "investor_pitch"),
         duration=round(float(session_snapshot.get("elapsed_seconds", 0.0)), 2),
         transcript=session_snapshot.get("full_transcript", ""),
         engagement_history=json.dumps(engagement_history, ensure_ascii=True),
@@ -175,15 +218,17 @@ async def generate_session_breakdown(session_snapshot: dict) -> dict:
         filler_count=int(session_snapshot.get("filler_count", 0)),
         avg_wpm=round(float(session_snapshot.get("words_per_minute", 0.0)), 2),
         avg_eye_contact=round(float(session_snapshot.get("eye_contact_score", 0.0)), 3),
+        avg_posture=round(float(session_snapshot.get("posture_score", 0.0)), 3),
+        gesture_score=round(float(session_snapshot.get("gesture_score", 0.0)), 3),
+        motion_score=round(float(session_snapshot.get("motion_score", 0.0)), 3),
+        expression=session_snapshot.get("expression", "neutral"),
         weakest_claim=session_snapshot.get("weakest_claim", ""),
+        pressure_events=json.dumps(
+            session_snapshot.get("pressure_events_fired", []), ensure_ascii=True
+        ),
     )
 
-    raw = await call_groq(
-        prompt=prompt,
-        timeout_seconds=20,
-        temperature=0.3,
-        max_output_tokens=1400,
-    )
+    raw = await call_gemini(prompt=prompt, timeout_seconds=20)
     parsed = _safe_json_parse(raw)
     if not parsed:
         return fallback_breakdown(session_snapshot)
@@ -196,13 +241,17 @@ def fallback_breakdown(session_snapshot: dict) -> dict:
     filler_count = int(session_snapshot.get("filler_count", 0))
     wpm = float(session_snapshot.get("words_per_minute", 0.0))
     eye = float(session_snapshot.get("eye_contact_score", 0.0))
+    posture = float(session_snapshot.get("posture_score", 0.5))
+    gesture = float(session_snapshot.get("gesture_score", 0.4))
+    motion = float(session_snapshot.get("motion_score", 0.0))
+    brow = float(session_snapshot.get("brow_furrow", 0.0))
 
     strengths: list[str] = []
     improvements: list[str] = []
 
     strengths.append("Maintained composure through the session")
     strengths.append("Completed the speaking run with full transcript coverage")
-    strengths.append("Sustained a complete speaking run from start to finish")
+    strengths.append("Handled dynamic audience pressure events")
 
     if filler_count > 15:
         improvements.append("Reduce filler words — use deliberate pauses instead")
@@ -212,6 +261,14 @@ def fallback_breakdown(session_snapshot: dict) -> dict:
         improvements.append("Slow down slightly to improve clarity")
     if eye < 0.6:
         improvements.append("Improve eye contact consistency with the camera")
+    if posture < 0.55:
+        improvements.append("Stand taller and keep shoulders level")
+    if gesture < 0.5:
+        improvements.append("Use deliberate hand gestures to emphasize key points")
+    if motion > 0.55:
+        improvements.append("Reduce swaying and reset your feet between points")
+    if brow > 0.55:
+        improvements.append("Relax facial tension so confidence reads clearly")
 
     while len(improvements) < 3:
         improvements.append("Tighten claim-evidence links for stronger arguments")
