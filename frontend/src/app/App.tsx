@@ -90,10 +90,13 @@ export default function App() {
     setChatLoading(true);
     try {
       const agentBase = import.meta.env.VITE_COACH_AGENT_URL || 'http://localhost:8000';
-      const res = await fetch(`${agentBase}/rest/post`, {
+      const res = await fetch(`${agentBase}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question }),
+        body: JSON.stringify({
+          question,
+          session_context: { breakdown: sessionResult?.breakdown || {} },
+        }),
       });
       if (!res.ok) {
         throw new Error(`chat_failed_${res.status}`);
@@ -290,6 +293,9 @@ export default function App() {
         )
       : null;
     const score = Number.isFinite(breakdown.overall_score) ? Math.round(Number(breakdown.overall_score)) : 0;
+    const eyeContactPct = Number.isFinite(Number((breakdown as any).avg_eye_contact))
+      ? Math.max(0, Math.min(100, Math.round(Number((breakdown as any).avg_eye_contact) * 100)))
+      : null;
     const strengths = (breakdown.strengths || []).slice(0, 3);
     const improvements = (breakdown.improvements || []).slice(0, 3);
     const highs = (breakdown.high_moments || []).length;
@@ -332,9 +338,9 @@ export default function App() {
         </div>
 
         <div className="grid grid-cols-12 gap-6 p-8 max-w-[1600px] mx-auto">
-          <div className="col-span-3">
+          <div className="col-span-3 space-y-4">
             <div
-              className="p-6 rounded-2xl h-[calc(100vh-180px)] overflow-y-auto"
+              className="p-6 rounded-2xl h-[calc(100vh-320px)] overflow-y-auto"
               style={{ backgroundColor: '#FFFFFF', border: '0.5px solid rgba(26, 26, 26, 0.1)' }}
             >
               <h2 className="mb-6" style={{ fontWeight: 500 }}>Feedback timeline</h2>
@@ -373,6 +379,40 @@ export default function App() {
                     )}
                   </div>
                 ))}
+              </div>
+            </div>
+
+            <div
+              className="p-6 rounded-2xl"
+              style={{ backgroundColor: '#FFFFFF', border: '0.5px solid rgba(26, 26, 26, 0.1)' }}
+            >
+              <h3 className="mb-3 opacity-60">Overall tips</h3>
+              <div className="space-y-2 text-sm">
+                {(() => {
+                  const keyInsight = String((breakdown as any).key_insight || (breakdown as any).next_session_focus || (breakdown as any).argument_feedback || '').trim();
+                  const tips = (Array.isArray((breakdown as any).overall_tips) ? (breakdown as any).overall_tips : [])
+                    .map((x: any) => String(x || '').trim())
+                    .filter(Boolean)
+                    .filter((t: string) => !keyInsight || !t.toLowerCase().startsWith('key insight:'))
+                    .slice(0, 3);
+
+                  if (!keyInsight && !tips.length) {
+                    return <div className="opacity-60">No overall tips returned for this session.</div>;
+                  }
+
+                  return (
+                    <>
+                      {keyInsight ? (
+                        <div>
+                          <span style={{ fontWeight: 600 }}>Key insight:</span> {keyInsight}
+                        </div>
+                      ) : null}
+                      {tips.map((tip: string, idx: number) => (
+                        <div key={idx}>{tip}</div>
+                      ))}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           </div>
@@ -529,11 +569,11 @@ export default function App() {
               className="p-6 rounded-2xl"
               style={{ backgroundColor: '#FFFFFF', border: '0.5px solid rgba(26, 26, 26, 0.1)' }}
             >
-              <h3 className="mb-2 opacity-60">Pace</h3>
+              <h3 className="mb-2 opacity-60">Average engagement</h3>
               <div className="text-4xl mb-1" style={{ fontWeight: 500 }}>
                 {avgEngagement !== null ? `${avgEngagement}%` : '--'}
               </div>
-              <p className="text-sm opacity-60 mb-4">Average engagement across the session</p>
+              <p className="text-sm opacity-60 mb-4">Average engagement throughout the video</p>
               <div className="flex gap-1 h-12 items-end">
                 {(engagementHistory.length ? engagementHistory.slice(-8).map((entry) => Math.max(8, Math.round(Number(entry.score || 0) * 100))) : [25, 35, 45, 55, 60, 58, 62, 68]).map((height, i) => (
                   <div
@@ -550,11 +590,18 @@ export default function App() {
               style={{ backgroundColor: '#FFFFFF', border: '0.5px solid rgba(26, 26, 26, 0.1)' }}
             >
               <h3 className="mb-2 opacity-60">Filler words</h3>
-              <div className="text-4xl mb-3" style={{ fontWeight: 500 }}>{improvements.length}</div>
-              <div className="space-y-1" style={{ color: '#E8B84B' }}>
-                {improvements.length ? improvements.map((item, index) => (
-                  <div key={index}>{item}</div>
-                )) : <div>No improvement notes returned</div>}
+              <div className="text-4xl mb-3" style={{ fontWeight: 500 }}>
+                {Number.isFinite(Number((breakdown as any).filler_count)) ? Number((breakdown as any).filler_count) : 0}
+              </div>
+              <div className="text-sm opacity-60 mb-3">
+                {(() => {
+                  const count = Number.isFinite(Number((breakdown as any).filler_count)) ? Number((breakdown as any).filler_count) : 0;
+                  const words = Array.isArray((breakdown as any).filler_words) ? (breakdown as any).filler_words : [];
+                  const list = words.map((x: any) => String(x || '').trim()).filter(Boolean).slice(0, 6);
+                  if (count <= 0) return 'No filler words detected';
+                  if (list.length) return `Detected: ${list.join(', ')}`;
+                  return 'Detected filler words, but could not classify them';
+                })()}
               </div>
             </div>
 
@@ -582,28 +629,15 @@ export default function App() {
                       strokeWidth="8"
                       fill="none"
                       strokeDasharray={`${2 * Math.PI * 56}`}
-                      strokeDashoffset={`${2 * Math.PI * 56 * (1 - score / 100)}`}
+                      strokeDashoffset={`${2 * Math.PI * 56 * (1 - (eyeContactPct === null ? 0 : eyeContactPct) / 100)}`}
                       strokeLinecap="round"
                     />
                   </svg>
                   <div className="absolute inset-0 flex items-center justify-center text-3xl" style={{ fontWeight: 500 }}>
-                    {score}%
+                    {eyeContactPct === null ? '--' : `${eyeContactPct}%`}
                   </div>
                 </div>
               </div>
-            </div>
-
-            <div
-              className="p-6 rounded-2xl"
-              style={{
-                backgroundColor: '#FFFBEF',
-                border: '1px solid #E8B84B'
-              }}
-            >
-              <h3 className="mb-2" style={{ color: '#E8B84B', fontWeight: 500 }}>Key insight</h3>
-              <p className="text-sm leading-relaxed">
-                {breakdown.next_session_focus || breakdown.argument_feedback || 'No final coaching summary was returned for this session.'}
-              </p>
             </div>
 
             <div
@@ -618,17 +652,6 @@ export default function App() {
               </div>
             </div>
 
-            <div
-              className="p-6 rounded-2xl"
-              style={{ backgroundColor: '#FFFFFF', border: '0.5px solid rgba(26, 26, 26, 0.1)' }}
-            >
-              <h3 className="mb-2 opacity-60">Session shape</h3>
-              <div className="space-y-1 opacity-80">
-                <div>High moments: {highs}</div>
-                <div>Low moments: {lows}</div>
-                <div>Audience size: {sessionConfig.audienceCount}</div>
-              </div>
-            </div>
           </div>
         </div>
       </div>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Literal
 
@@ -18,6 +19,8 @@ from podium.agents.coach_agent import coach_agent
 from podium.agents.fusion_agent import fusion_agent
 from podium.agents.speech_agent import speech_agent
 from podium.agents.vision_agent import vision_agent
+from podium.agents.coach_agent import SYSTEM_PROMPT as COACH_SYSTEM_PROMPT
+from podium.agents.coach_agent import client as asi1_client
 from podium.core.argument import call_groq
 from podium.db.mongo import connect, disconnect
 from podium.session import SessionState
@@ -130,17 +133,34 @@ async def chat(request: ChatRequest) -> ChatResponse:
     if not question:
         return ChatResponse(answer="Ask a specific question about your session.")
 
-    prompt = CHAT_PROMPT.format(
-        session_breakdown=json.dumps(request.session_context.get("breakdown", {}), ensure_ascii=True),
-        question=question,
-    )
-    raw = await call_groq(
-        prompt=prompt,
-        timeout_seconds=10.0,
-        temperature=0.2,
-        max_output_tokens=300,
-    )
-    answer = " ".join((raw or "").split()).strip()
+    breakdown = request.session_context.get("breakdown", {}) if isinstance(request.session_context, dict) else {}
+    breakdown_json = json.dumps(breakdown or {}, ensure_ascii=True)
+
+    # Prefer ASI1 (OpenAI-compatible) when configured; otherwise fall back to Groq.
+    answer = ""
+    if os.getenv("ASI1_API_KEY", "").strip():
+        try:
+            r = asi1_client.chat.completions.create(
+                model="asi1",
+                messages=[
+                    {"role": "system", "content": COACH_SYSTEM_PROMPT},
+                    {"role": "user", "content": CHAT_PROMPT.format(session_breakdown=breakdown_json, question=question)},
+                ],
+                max_tokens=300,
+            )
+            answer = " ".join((str(r.choices[0].message.content) or "").split()).strip()
+        except Exception:
+            logger.exception("ASI1 chat failed; falling back to Groq")
+
+    if not answer:
+        prompt = CHAT_PROMPT.format(session_breakdown=breakdown_json, question=question)
+        raw = await call_groq(
+            prompt=prompt,
+            timeout_seconds=10.0,
+            temperature=0.2,
+            max_output_tokens=300,
+        )
+        answer = " ".join((raw or "").split()).strip()
     if not answer:
         answer = "I couldn't generate a follow-up answer right now. Try again in a moment."
     return ChatResponse(answer=answer)

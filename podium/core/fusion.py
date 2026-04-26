@@ -2,16 +2,17 @@ from __future__ import annotations
 
 from statistics import pstdev
 
-from .speech import calculate_filler_score, calculate_pace_score
+from .speech import calculate_filler_score, calculate_pace_score, calculate_pause_score
 
-EYE_CONTACT_WEIGHT = 0.28
+EYE_CONTACT_WEIGHT = 0.26
 POSTURE_WEIGHT = 0.14
 GESTURE_WEIGHT = 0.12
-MOTION_WEIGHT = 0.10
+MOTION_WEIGHT = 0.08
 EXPRESSION_WEIGHT = 0.08
 FILLER_WEIGHT = 0.12
 PACE_WEIGHT = 0.10
-ENERGY_VARIANCE_WEIGHT = 0.06
+ENERGY_VARIANCE_WEIGHT = 0.04
+PAUSE_WEIGHT = 0.06
 
 DOMINANT_SIGNAL_OPTIONS = [
     "strong_eye_contact",
@@ -124,7 +125,7 @@ def calculate_engagement(
     delivery_events: list[dict] | None = None,
     vision_confidence: float = 1.0,
 ) -> tuple[float, str, dict]:
-    del pause_count, elapsed_seconds, vocal_energy
+    del vocal_energy
     energy_history = energy_history or []
     engagement_history = engagement_history or []
     delivery_events = delivery_events or []
@@ -138,6 +139,7 @@ def calculate_engagement(
     filler_component = calculate_filler_score(filler_rate)
     pace_component = calculate_pace_score(words_per_minute)
     energy_component = calculate_vocal_energy_variance(energy_history)
+    pause_component = calculate_pause_score(int(pause_count), float(elapsed_seconds))
 
     components = {
         "eye_contact": eye_component,
@@ -148,6 +150,7 @@ def calculate_engagement(
         "fillers": filler_component,
         "pace": pace_component,
         "energy": energy_component,
+        "pauses": pause_component,
     }
 
     score = (
@@ -159,6 +162,7 @@ def calculate_engagement(
         + filler_component * FILLER_WEIGHT
         + pace_component * PACE_WEIGHT
         + energy_component * ENERGY_VARIANCE_WEIGHT
+        + pause_component * PAUSE_WEIGHT
     )
     event_penalty = sum(float(event.get("severity", 0.0)) for event in delivery_events[:3]) * 0.12
     score -= event_penalty * vision_confidence

@@ -52,7 +52,8 @@ class SessionState:
     delivery_events: list[dict] = field(default_factory=list)
     calibrated_vision_scores: dict = field(default_factory=dict)
 
-    engagement_score: float = 0.5
+    # Start a bit optimistic/realistic; adjust over first ~10s via fusion smoothing.
+    engagement_score: float = 0.8
     engagement_history: list[dict] = field(default_factory=list)
     dominant_signal: str = "confident_delivery"
     engagement_trend: str = "stable"
@@ -119,19 +120,35 @@ class SessionState:
 
     def update_engagement(self, score: float, signal: str, trend: str) -> None:
         now = self.get_elapsed_seconds()
-        score = max(0.0, min(1.0, float(score)))
+        target = max(0.0, min(1.0, float(score)))
         with self._lock:
-            self.engagement_score = score
+            # Smooth engagement to avoid jitter and only move for real signal changes.
+            # - We rise a bit faster than we fall (real audiences are "sticky" unless things go badly).
+            # - We avoid big early drops while the signal is still warming up.
+            alpha_up = 0.32
+            alpha_down = 0.08
+            if now < 8:
+                alpha_up = 0.18
+                alpha_down = 0.04  # warm-up: very sticky downward
+
+            current = float(self.engagement_score)
+            delta = target - current
+            # Allow fast drops only when the target is *much* worse (clear degradation).
+            if delta < -0.25:
+                alpha_down = max(alpha_down, 0.22)
+            alpha = alpha_up if delta >= 0 else alpha_down
+
+            self.engagement_score = alpha * target + (1 - alpha) * current
             self.dominant_signal = signal
             self.engagement_trend = trend
             self.engagement_history.append(
                 {
-                    "score": score,
+                    "score": float(self.engagement_score),
                     "timestamp": now,
                     "dominant_signal": signal,
                 }
             )
-            if score > 0.75:
+            if float(self.engagement_score) > 0.75:
                 if len(self.engagement_history) > 1:
                     prev_t = self.engagement_history[-2]["timestamp"]
                     self.high_engagement_streak += int(max(1.0, now - prev_t))
@@ -215,8 +232,16 @@ class SessionState:
         vision_confidence = max(0.0, min(1.0, float(vision_confidence)))
         face_size = max(0.0, float(face_size))
         expression = (expression or "neutral").strip().lower()[:40]
+
+        # Eye-contact is only meaningful when the vision signal is reliable.
+        # Gate it on face detection + minimum confidence/size, and avoid reporting
+        # "perfect 100%" from low-confidence heuristics.
+        face_ok = bool(face_detected) and vision_confidence >= 0.45 and face_size >= 0.08
+        effective_eye = eye_contact if face_ok else 0.5
+        if vision_confidence < 0.75:
+            effective_eye = min(effective_eye, 0.95)
         with self._lock:
-            self.eye_contact_score = 0.3 * eye_contact + 0.7 * self.eye_contact_score
+            self.eye_contact_score = 0.3 * effective_eye + 0.7 * self.eye_contact_score
             self.face_detected = bool(face_detected)
             self.gesture_detected = bool(gesture)
             self.gesture_history.append(bool(gesture))
@@ -233,6 +258,7 @@ class SessionState:
                 {
                     "timestamp": now,
                     "eye_contact": eye_contact,
+                    "eye_contact_effective": effective_eye,
                     "face_detected": bool(face_detected),
                     "gesture_detected": bool(gesture),
                     "posture_score": posture_score,

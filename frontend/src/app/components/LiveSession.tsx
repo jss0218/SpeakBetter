@@ -204,12 +204,13 @@ export function LiveSession({
   const [connectionState, setConnectionState] = useState('Connecting');
   const [micLevel, setMicLevel] = useState(0);
   const [wpm, setWpm] = useState(0);
-  const [engagementScore, setEngagementScore] = useState(0.9);
+  const [engagementScore, setEngagementScore] = useState(0.8);
   const [dominantSignal, setDominantSignal] = useState('--');
   const [questionText, setQuestionText] = useState('Speak for a bit, then stop the session to receive a voiced adversarial question.');
   const [questionPending, setQuestionPending] = useState(false);
   const [showEndButton, setShowEndButton] = useState(false);
   const [audience, setAudience] = useState<AudienceMember[]>(() => createInitialAudience(audienceSize));
+  // Keep debug logs internal-only; do not render to end users.
   const [debugLines, setDebugLines] = useState<string[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -467,7 +468,8 @@ export function LiveSession({
       head_roll: 0,
       face_size: 0.2,
       hand_motion: motionScore,
-      vision_confidence: 0.35,
+      // This is a heuristic vision signal; keep it moderate so backend doesn't clamp to neutral.
+      vision_confidence: 0.55,
     };
   };
 
@@ -563,7 +565,7 @@ export function LiveSession({
   };
 
   const startSession = async () => {
-    const backendBase = import.meta.env.VITE_PODIUM_BACKEND_URL || 'http://localhost:8001';
+    const backendBase = import.meta.env.VITE_PODIUM_BACKEND_URL || 'http://localhost:8000';
     const backendUrl = new URL(backendBase);
     const protocol = backendUrl.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${backendUrl.host}/ws/${encodeURIComponent(sessionIdRef.current)}?user_id=${encodeURIComponent('frontend_user')}&scenario=${encodeURIComponent(practiceType)}&target_duration=${encodeURIComponent(duration * 60)}&audience_size=${encodeURIComponent(audienceSize)}`;
@@ -602,10 +604,7 @@ export function LiveSession({
       }
       if (data.type === 'transcript') {
         setWpm(Math.round(Number(data.wpm || 0)));
-        const text = String(data.text || '').trim();
-        if (text) {
-          setStatusText(`Transcript: ${text}`);
-        }
+        // Consumer UI: don't surface raw transcript as a live status message.
       }
       if (data.type === 'engagement_update') {
         setEngagementScore(Number(data.score || 0));
@@ -626,7 +625,7 @@ export function LiveSession({
       if (data.type === 'coach_tip') {
         const tip = String(data.tip || '').trim();
         if (tip) {
-          setStatusText(`Coach tip: ${tip}`);
+          setStatusText(tip);
         }
         const audioBase64 = String(data.audio_base64 || '');
         if (audioBase64) {
@@ -641,7 +640,7 @@ export function LiveSession({
         const question = String(data.question || '').trim();
         if (question) {
           setQuestionText(question);
-          setStatusText(`Question: ${question}`);
+          setStatusText('Crowd question ready.');
           setPhase('qa');
           setQuestionPending(true);
         }
@@ -725,8 +724,14 @@ export function LiveSession({
       window.clearTimeout(questionTimeoutRef.current);
     }
     questionTimeoutRef.current = window.setTimeout(() => {
-      setStatusText('Still waiting for the backend question. Check the server logs.');
-      pushDebug('Timed out waiting for qa_question');
+      // Safety net: if no QA question arrives, auto-finish so we never get stuck.
+      pushDebug('Timed out waiting for qa_question; auto-finalizing session');
+      setStatusText('The crowd does not have any questions. Generating your final breakdown…');
+      setConnectionState('Finalizing');
+      shouldStreamAudioRef.current = false;
+      setMicLevel(0);
+      socket.send(JSON.stringify({ type: 'qa_answer_done', timestamp: Date.now() / 1000 }));
+      setPhase('finishing');
     }, 15000);
   };
 
@@ -767,26 +772,12 @@ export function LiveSession({
         </div>
       </div>
 
-      <div className="absolute top-14 right-6 z-20 flex gap-3">
-        {[
-          { label: `Mic ${micLevel}%` },
-          { label: `WPM ${wpm}` },
-          { label: `Engagement ${Math.round(engagementScore * 100)}%` },
-        ].map((chip) => (
-          <div
-            key={chip.label}
-            className="px-4 py-2 rounded-full"
-            style={{ backgroundColor: 'rgba(255,255,255,0.08)', color: '#FFFFFF', backdropFilter: 'blur(8px)' }}
-          >
-            {chip.label}
-          </div>
-        ))}
-      </div>
-
-      <div className="absolute top-14 left-6 z-20 max-w-xl rounded-3xl px-5 py-4" style={{ backgroundColor: 'rgba(0,0,0,0.35)', color: '#FFFFFF', backdropFilter: 'blur(8px)' }}>
-        <div className="text-xs uppercase tracking-[0.28em] opacity-60">Live status</div>
+      <div
+        className="absolute top-14 left-6 z-20 max-w-xl rounded-3xl px-5 py-4"
+        style={{ backgroundColor: 'rgba(0,0,0,0.35)', color: '#FFFFFF', backdropFilter: 'blur(8px)' }}
+      >
+        <div className="text-xs uppercase tracking-[0.28em] opacity-60">Status</div>
         <div className="mt-2 text-lg" style={{ fontWeight: 500 }}>{statusText}</div>
-        <div className="mt-2 text-sm opacity-70">Signal: {dominantSignal}</div>
       </div>
 
       <div className="absolute inset-0 flex items-center justify-center" style={{ paddingTop: '36px' }}>
@@ -883,16 +874,7 @@ export function LiveSession({
         </div>
       )}
 
-      <div className="absolute bottom-6 left-6 z-20 w-[420px] rounded-[28px] p-5" style={{ backgroundColor: 'rgba(0,0,0,0.32)', color: '#FFFFFF', backdropFilter: 'blur(18px)' }}>
-        <div className="text-xs uppercase tracking-[0.28em]" style={{ color: '#E8B84B' }}>Session debug</div>
-        <div className="mt-3 space-y-2 text-sm opacity-85">
-          {debugLines.length ? (
-            debugLines.map((line) => <div key={line}>{line}</div>)
-          ) : (
-            <div>Waiting for session startup…</div>
-          )}
-        </div>
-      </div>
+      {/* Dev-only debug UI removed for consumer experience */}
     </div>
   );
 }

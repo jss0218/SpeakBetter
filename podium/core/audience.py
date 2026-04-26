@@ -90,21 +90,29 @@ def calculate_avatar_states(
             distribution[state] = distribution.get(state, 0.0) + delta
         distribution = _renormalize(distribution)
 
+    # Natural audience behavior: avoid rapid oscillations.
+    # Allow only a small fraction of avatars to change per update tick.
+    max_changes = max(1, int(round(audience_size * 0.12)))
+    changes_used = 0
+
     for avatar_id, current in list(states.items()):
+        if changes_used >= max_changes:
+            break
         if avatar_id not in stubbornness_factors:
             continue
-        change_probability = 1.0 - max(0.0, min(1.0, stubbornness_factors[avatar_id]))
+        base_change_probability = 1.0 - max(0.0, min(1.0, stubbornness_factors[avatar_id]))
+        # Reduce churn further; audience shouldn't flip often unless things are clearly trending.
+        change_probability = base_change_probability * 0.35
         if random.random() > change_probability:
             continue
 
-        if random.random() < 0.10:
-            new_state = random.choice(AVATAR_STATES)
-        else:
-            new_state = _sample_distribution(distribution)
+        # Avoid chaotic random jumps; mostly follow the distribution.
+        new_state = _sample_distribution(distribution)
 
         if new_state != current:
             states[avatar_id] = new_state
-            delays[avatar_id] = random.randint(0, 800)
+            delays[avatar_id] = random.randint(200, 1400)
+            changes_used += 1
 
     return states, delays
 

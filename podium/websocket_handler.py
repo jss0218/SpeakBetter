@@ -96,24 +96,38 @@ def _extract_incremental_delta(prev: str, current: str) -> str:
     """
     Given a growing transcript, extract the "new" portion robustly.
 
-    We intentionally operate on token boundaries (whitespace-separated words)
-    because STT outputs can vary in punctuation/casing across overlapping windows.
+    ElevenLabs STT is called on overlapping rolling windows. The returned text can:
+    - start mid-sentence (not from the beginning of the session)
+    - change punctuation/casing in the overlap
+    - slightly rewrite earlier words
+
+    So we compute the delta by finding the largest token overlap between:
+    prev suffix and current prefix.
     """
-    prev_tokens = (prev or "").split()
-    cur_tokens = (current or "").split()
+    prev_tokens = [t.lower() for t in (prev or "").split()]
+    cur_tokens = [t.lower() for t in (current or "").split()]
     if not cur_tokens:
         return ""
     if not prev_tokens:
-        return " ".join(cur_tokens).strip()
+        return current.strip()
 
-    # Find the longest common prefix in tokens.
-    i = 0
-    max_i = min(len(prev_tokens), len(cur_tokens))
-    while i < max_i and prev_tokens[i].lower() == cur_tokens[i].lower():
-        i += 1
+    max_k = min(len(prev_tokens), len(cur_tokens))
+    overlap_k = 0
+    for k in range(max_k, 0, -1):
+        if prev_tokens[-k:] == cur_tokens[:k]:
+            overlap_k = k
+            break
 
-    delta = " ".join(cur_tokens[i:]).strip()
-    return delta
+    if overlap_k > 0:
+        return " ".join((current or "").split()[overlap_k:]).strip()
+
+    # Fallback: if there is no detectable overlap, only emit something when
+    # the current text is clearly longer, otherwise treat as rewrite/noise.
+    cur_raw_tokens = (current or "").split()
+    prev_raw_tokens = (prev or "").split()
+    if len(cur_raw_tokens) > len(prev_raw_tokens):
+        return " ".join(cur_raw_tokens[len(prev_raw_tokens) :]).strip()
+    return ""
 
 
 async def handle_elevenlabs_stt_stream(
@@ -281,7 +295,7 @@ async def fusion_loop(session: SessionState, websocket: WebSocket, stop_event: a
 
             payload = EngagementUpdateMessage(
                 type="engagement_update",
-                score=score,
+                score=session.engagement_score,
                 dominant_signal=dominant_signal,
                 trend=trend,
                 component_scores=components,
@@ -397,10 +411,67 @@ async def _finalize_session(
         pass
 
 
-async def handle_pause_session(session: SessionState, websocket: WebSocket) -> None:
+async def handle_pause_session(
+    session: SessionState,
+    websocket: WebSocket,
+    tasks: list[asyncio.Task],
+    stop_event: asyncio.Event,
+) -> None:
     session.session_phase = "asking_question"
 
-    if session.word_count >= 80 and not session.adversarial_question.strip():
+    def _clean_question(text: str) -> str:
+        q = " ".join(str(text or "").split()).strip()
+        if not q:
+            return ""
+        # Remove stray quoting/backticks that sometimes leak from models.
+        q = q.strip("`\"' ").strip()
+        # Keep it reasonably short for TTS and UI.
+        if len(q) > 220:
+            q = q[:219].rstrip() + "…"
+        # Normalize punctuation; ensure it's a question.
+        if not q.endswith("?"):
+            q = q.rstrip(".! ") + "?"
+        return q
+
+    def _looks_valid_question(text: str) -> bool:
+        q = _clean_question(text)
+        if not q:
+            return False
+        # Must contain enough words to be meaningful, but not be a paragraph.
+        words = [w for w in q.replace("…", "").split() if w.strip()]
+        if len(words) < 6 or len(words) > 45:
+            return False
+        # Avoid obvious garbage / placeholder-y output.
+        low = q.lower()
+        if any(tok in low for tok in ["lorem", "asdf", "qwerty", "null", "undefined", "{", "}", "[", "]"]):
+            return False
+        # Must have mostly printable characters.
+        printable = sum(1 for ch in q if ch.isprintable())
+        if printable / max(1, len(q)) < 0.98:
+            return False
+        # Avoid too much repeated punctuation.
+        if "??" in q or "!!" in q:
+            return False
+        return True
+
+    def _fallback_crowd_question(transcript: str, scenario: str) -> str:
+        # Used when the claim extractor can't produce a question (API missing/timeout/etc).
+        # Keep it specific by referencing a short snippet, without dev-y phrasing.
+        words = [w for w in (transcript or "").split() if w.strip()]
+        tail = " ".join(words[-14:]).strip()
+        if scenario == "pitch":
+            base = "What specific proof do you have that customers will pay for this?"
+        elif scenario == "interview":
+            base = "Can you give one concrete example from your experience that proves your main point?"
+        else:  # presentation
+            base = "What evidence supports your main claim, and what would change your conclusion?"
+        if tail:
+            return f'{base} For example, you mentioned: "{tail}".'
+        return base
+
+    # Try to generate a crowd question.
+    # The extractor may return empty for short/low-substance transcripts; we always fall back.
+    if not session.adversarial_question.strip():
         try:
             result = await extract_claims_and_question(session.full_transcript, session.scenario)
             if result:
@@ -418,13 +489,20 @@ async def handle_pause_session(session: SessionState, websocket: WebSocket) -> N
         except Exception as exc:
             logger.exception("Pause-session argument generation failed: %s", exc)
 
-    question = session.adversarial_question.strip()
+    # Always ask *something* on pause, even for very short transcripts.
+    if not session.adversarial_question.strip():
+        session.adversarial_question = _fallback_crowd_question(session.full_transcript, session.scenario)
+
+    question = _clean_question(session.adversarial_question)
+    if not _looks_valid_question(question):
+        question = _clean_question(_fallback_crowd_question(session.full_transcript, session.scenario))
     if not question:
         logger.warning(
             "Skipping QA question send because adversarial_question is empty. word_count=%s",
             session.word_count,
         )
-        return
+        # Extremely defensive fallback; should be unreachable.
+        question = "What is the single main point you want the audience to remember?"
 
     elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
     audio_base64 = await synthesize_question_audio(question, elevenlabs_key)
@@ -497,7 +575,9 @@ async def handle_session(websocket: WebSocket, session_id: str, session: Session
             elif msg_type == "vision_calibration":
                 await handle_vision_calibration(msg, session)
             elif msg_type == "pause_session":
-                await handle_pause_session(session, websocket)
+                await handle_pause_session(session, websocket, tasks, stop_event)
+                if stop_event.is_set():
+                    break
             elif msg_type == "session_end":
                 await _cancel_live_tasks(tasks)
                 await _finalize_session(session, websocket, stop_event)

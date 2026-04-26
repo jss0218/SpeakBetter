@@ -30,7 +30,7 @@ Rules:
 - Only include claims the speaker actually made
 - Each question must be specific to what was said, not generic
 - Return exactly {question_count} questions when the transcript is long enough
-- If transcript has fewer than 80 words, return {{"claims": [], "weakest_claim": "", "gap_explanation": "", "adversarial_questions": []}}
+- If transcript has fewer than 25 words, return {{"claims": [], "weakest_claim": "", "gap_explanation": "", "adversarial_questions": []}}
 
 Scenario-specific behavior:
 
