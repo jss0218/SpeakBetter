@@ -89,14 +89,11 @@ export default function App() {
     setChatMessages(prev => [...prev, { role: 'user', content: question }]);
     setChatLoading(true);
     try {
-      const backendBase = import.meta.env.VITE_PODIUM_BACKEND_URL || 'http://localhost:8000';
-      const res = await fetch(`${backendBase}/api/chat`, {
+      const agentBase = import.meta.env.VITE_COACH_AGENT_URL || 'http://localhost:8000';
+      const res = await fetch(`${agentBase}/rest/post`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          question,
-          session_context: { breakdown: sessionResult?.breakdown || {} },
-        }),
+        body: JSON.stringify({ question }),
       });
       if (!res.ok) {
         throw new Error(`chat_failed_${res.status}`);

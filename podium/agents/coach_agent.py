@@ -21,132 +21,153 @@ questions targeting the weakest point in your argument.
 - Testing arguments before a debate or presentation
 
 ## How to start
-Just tell me what you want to practice:
-"I want to practice a 5 minute pitch"
-"Help me prepare for an interview"
-"I need to practice my presentation for 10 minutes"
+Just tell me what you want to practice or ask for coaching advice:
+"How do I improve my eye contact?"
+"What are the most common filler words to avoid?"
+"Give me tips for a 5-minute pitch"
 
 ## Tags
 public-speaking, coaching, presentation, pitch, interview-prep,
 AI-coach, real-time-feedback, argument-analysis, audience-simulation
 """
 
-from __future__ import annotations
-
-import os
-import re
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict
 from uuid import uuid4
 
-from uagents import Model
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
-from podium.agents.base import create_podium_agent
-from podium.core.coach import generate_realtime_tip, generate_session_breakdown, voice_tip
+import os
 
-try:
-    from uagents.experimental.chat import ChatMessage
-except Exception:  # pragma: no cover
-    class ChatMessage(Model):
-        content: str
-
-
-coach_agent = create_podium_agent(
-    name="podium-coach-agent",
-    seed="podium_coach_agent_seed_v1",
-    port=8000,
-    description="Main Podium coach agent and ASI:One entrypoint",
+from openai import OpenAI
+from uagents import Agent, Context, Model, Protocol
+from uagents_core.contrib.protocols.chat import (
+    ChatAcknowledgement,
+    ChatMessage,
+    EndSessionContent,
+    TextContent,
+    chat_protocol_spec,
 )
 
+client = OpenAI(
+    base_url="https://api.asi1.ai/v1",
+    api_key=os.getenv("ASI1_API_KEY", ""),
+)
 
-class CoachTipRequest(Model):
-    session_id: str
-    recent_transcript: str
-    dominant_signal: str
-    coach_tips: list[dict]
-    last_tip_timestamp: float
-    current_timestamp: float
+coach_agent = Agent(
+    name="podium-coach-agent",
+    seed="podium_coach_agent_seed_v12026",
+    port=8000,
+    mailbox=True,
+    publish_agent_details=True,
+)
 
-
-class CoachTipResponse(Model):
-    session_id: str
-    tip: str
-    audio_base64: str
-    has_audio: bool
-
-
-class BreakdownRequest(Model):
-    session_id: str
-    session_snapshot: dict
+protocol = Protocol(spec=chat_protocol_spec)
 
 
-class BreakdownResponse(Model):
-    session_id: str
-    breakdown: dict
-
-
-def _parse_scenario_and_duration(content: str) -> tuple[str, int]:
-    text = (content or "").lower()
-
-    scenario = "pitch"
-    if "interview" in text:
-        scenario = "interview"
-    elif "presentation" in text or "presenting" in text or "talk" in text:
-        scenario = "presentation"
-    elif "pitch" in text:
-        scenario = "pitch"
-
-    duration_seconds = 300
-    match = re.search(r"(\d+)\s*(minute|minutes|min)", text)
-    if match:
-        duration_seconds = max(60, int(match.group(1)) * 60)
-
-    return scenario, duration_seconds
-
-
-@coach_agent.on_message(model=ChatMessage)
-async def handle_chat(ctx, sender, msg: ChatMessage) -> None:
-    scenario, duration = _parse_scenario_and_duration(getattr(msg, "content", ""))
-    session_id = str(uuid4())
-    response = (
-        f"Ready to coach your {scenario}.\n"
-        f"Session ID: {session_id}\n"
-        f"Connect your browser to: ws://localhost:8000/ws/{session_id}?user_id=asi_user&scenario={scenario}&target_duration={duration}\n"
-        "Start speaking when you see the audience appear.\n"
-        "I will coach you live and ask you a tough question at the end."
-    )
-    await ctx.send(sender, ChatMessage(content=response))
-
-
-@coach_agent.on_message(model=CoachTipRequest)
-async def handle_tip_request(ctx, sender, msg: CoachTipRequest) -> None:
-    tip = await generate_realtime_tip(
-        recent_transcript=msg.recent_transcript,
-        dominant_signal=msg.dominant_signal,
-        coach_tips=msg.coach_tips,
-        last_tip_timestamp=msg.last_tip_timestamp,
-        current_timestamp=msg.current_timestamp,
+@protocol.on_message(ChatMessage)
+async def handle_message(ctx: Context, sender: str, msg: ChatMessage) -> None:
+    await ctx.send(
+        sender,
+        ChatAcknowledgement(timestamp=datetime.now(), acknowledged_msg_id=msg.msg_id),
     )
 
-    audio_base64 = ""
-    if tip:
-        elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
-        audio = await voice_tip(tip, elevenlabs_key)
-        if audio:
-            audio_base64 = audio
+    text = ""
+    for item in msg.content:
+        if isinstance(item, TextContent):
+            text += item.text
 
-    output = CoachTipResponse(
-        session_id=msg.session_id,
-        tip=tip or "",
-        audio_base64=audio_base64,
-        has_audio=bool(audio_base64),
+    response = "I am afraid something went wrong and I am unable to answer your question at the moment."
+    try:
+        r = client.chat.completions.create(
+            model="asi1",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """You are Podium, an expert AI public speaking coach.
+You help users improve their public speaking skills: delivery, eye contact, pacing, filler words,
+posture, gestures, argument structure, and confidence.
+Give specific, actionable advice. Keep responses concise (under 150 words).
+If asked about something unrelated to public speaking or coaching, politely redirect.""",
+                },
+                {"role": "user", "content": text},
+            ],
+            max_tokens=2048,
+        )
+        response = str(r.choices[0].message.content)
+    except Exception:
+        ctx.logger.exception("Error querying ASI:One model")
+
+    await ctx.send(
+        sender,
+        ChatMessage(
+            timestamp=datetime.utcnow(),
+            msg_id=uuid4(),
+            content=[
+                TextContent(type="text", text=response),
+                EndSessionContent(type="end-session"),
+            ],
+        ),
     )
-    await ctx.send(sender, output)
 
 
-@coach_agent.on_message(model=BreakdownRequest)
-async def handle_breakdown_request(ctx, sender, msg: BreakdownRequest) -> None:
-    breakdown = await generate_session_breakdown(msg.session_snapshot)
-    output = BreakdownResponse(session_id=msg.session_id, breakdown=breakdown)
-    await ctx.send(sender, output)
+@protocol.on_message(ChatAcknowledgement)
+async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement) -> None:
+    pass
+
+
+coach_agent.include(protocol, publish_manifest=True)
+
+
+SYSTEM_PROMPT = """You are Podium, an expert AI public speaking coach.
+You help users improve their public speaking skills: delivery, eye contact, pacing, filler words,
+posture, gestures, argument structure, and confidence.
+Give specific, actionable advice. Keep responses concise (under 150 words).
+If asked about something unrelated to public speaking or coaching, politely redirect."""
+
+
+class CoachRequest(Model):
+    question: str
+
+
+class CoachResponse(Model):
+    timestamp: int
+    answer: str
+    agent_address: str
+
+
+@coach_agent.on_rest_get("/rest/get", CoachResponse)
+async def handle_get(ctx: Context) -> Dict[str, Any]:
+    return {
+        "timestamp": int(time.time()),
+        "answer": "Podium coach agent is live. POST a question to /rest/post to get coaching advice.",
+        "agent_address": ctx.agent.address,
+    }
+
+
+@coach_agent.on_rest_post("/rest/post", CoachRequest, CoachResponse)
+async def handle_post(ctx: Context, req: CoachRequest) -> CoachResponse:
+    answer = "I am afraid something went wrong and I am unable to answer your question at the moment."
+    try:
+        r = client.chat.completions.create(
+            model="asi1",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": req.question},
+            ],
+            max_tokens=512,
+        )
+        answer = str(r.choices[0].message.content)
+    except Exception:
+        ctx.logger.exception("Error querying ASI:One model (REST)")
+    return CoachResponse(
+        timestamp=int(time.time()),
+        answer=answer,
+        agent_address=ctx.agent.address,
+    )
 
 
 if __name__ == "__main__":
