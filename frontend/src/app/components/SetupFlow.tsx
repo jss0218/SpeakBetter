@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Logo } from './Logo';
 
 interface SessionConfig {
   practiceType: 'pitch' | 'presentation' | 'interview';
@@ -41,11 +42,7 @@ export function SetupFlow({ onStart, onBack }: SetupFlowProps) {
     <div className="min-h-screen pb-32" style={{ backgroundColor: '#FAFAF7', color: '#1A1A1A' }}>
       <div className="px-8 py-6">
         <div className="max-w-[520px] mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-1">
-            <span style={{ fontWeight: 500 }}>speak</span>
-            <span style={{ fontWeight: 500, color: '#E8B84B' }}>B</span>
-            <span style={{ fontWeight: 500 }}>etter</span>
-          </div>
+          <Logo height={60} />
           <button
             onClick={onBack}
             className="px-4 py-2 rounded-full opacity-60 hover:opacity-100 transition-opacity"

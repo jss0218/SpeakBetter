@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ImageWithFallback } from './components/figma/ImageWithFallback';
 import { Calibration } from './components/Calibration';
 import { LiveSession } from './components/LiveSession';
+import { Logo } from './components/Logo';
 import { SetupFlow } from './components/SetupFlow';
 
 type Screen = 'landing' | 'setup' | 'calibration' | 'session' | 'results';
@@ -36,15 +37,6 @@ interface SessionResult {
   recordingUrl: string | null;
 }
 
-function Logo() {
-  return (
-    <div className="flex items-center gap-1">
-      <span style={{ fontWeight: 500 }}>speak</span>
-      <span style={{ fontWeight: 500, color: '#E8B84B' }}>B</span>
-      <span style={{ fontWeight: 500 }}>etter</span>
-    </div>
-  );
-}
 
 function BackButton({ onClick }: { onClick: () => void }) {
   return (

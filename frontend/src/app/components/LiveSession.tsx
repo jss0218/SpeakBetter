@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Logo } from './Logo';
 
 interface PersonDef {
   name: string;
@@ -755,11 +756,7 @@ export function LiveSession({
         className="absolute top-0 left-0 right-0 z-20 flex items-center justify-between px-6"
         style={{ height: '36px', backgroundColor: 'rgba(0,0,0,0.3)', backdropFilter: 'blur(8px)' }}
       >
-        <div className="flex items-center gap-1 opacity-40">
-          <span style={{ fontSize: '13px', fontWeight: 500, color: '#FFFFFF' }}>speak</span>
-          <span style={{ fontSize: '13px', fontWeight: 500, color: '#E8B84B' }}>B</span>
-          <span style={{ fontSize: '13px', fontWeight: 500, color: '#FFFFFF' }}>etter</span>
-        </div>
+        <Logo dark height={28} />
         <div className="font-mono" style={{ fontSize: '13px', color: '#FFFFFF', opacity: 0.6, fontWeight: 500 }}>
           {formatTime(seconds)}
         </div>
