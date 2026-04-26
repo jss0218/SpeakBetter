@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ImageWithFallback } from './components/figma/ImageWithFallback';
 import { LiveSession } from './components/LiveSession';
 import { SetupFlow } from './components/SetupFlow';
@@ -9,6 +9,30 @@ interface FeedbackItem {
   timestamp: string;
   text: string;
   category: 'filler' | 'pacing' | 'eyecontact';
+}
+
+interface SessionBreakdown {
+  overall_score?: number;
+  high_moments?: Array<{
+    timestamp_seconds?: number;
+    description?: string;
+    transcript_snippet?: string;
+  }>;
+  low_moments?: Array<{
+    timestamp_seconds?: number;
+    description?: string;
+    transcript_snippet?: string;
+  }>;
+  strengths?: string[];
+  improvements?: string[];
+  next_session_focus?: string;
+  argument_feedback?: string;
+}
+
+interface SessionResult {
+  breakdown: SessionBreakdown;
+  engagementHistory: Array<Record<string, unknown>>;
+  recordingUrl: string | null;
 }
 
 function Logo() {
@@ -43,6 +67,16 @@ export default function App() {
   });
   const [chatInput, setChatInput] = useState('');
   const [progress, setProgress] = useState(45);
+  const [sessionResult, setSessionResult] = useState<SessionResult | null>(null);
+  const resultsVideoRef = useRef<HTMLVideoElement | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (sessionResult?.recordingUrl) {
+        URL.revokeObjectURL(sessionResult.recordingUrl);
+      }
+    };
+  }, [sessionResult]);
 
   if (currentScreen === 'landing') {
     return (
@@ -181,20 +215,42 @@ export default function App() {
       <LiveSession
         audienceSize={Math.min(20, Math.max(1, sessionConfig.audienceCount))}
         duration={sessionConfig.duration}
-        onEndSession={() => setCurrentScreen('results')}
+        practiceType={sessionConfig.practiceType}
+        onEndSession={(result) => {
+          setSessionResult(result);
+          setCurrentScreen('results');
+        }}
       />
     );
   }
 
   if (currentScreen === 'results') {
+    const breakdown = sessionResult?.breakdown || {};
+    const engagementHistory = sessionResult?.engagementHistory || [];
     const feedbackItems: FeedbackItem[] = [
-      { timestamp: '0:12', text: 'Strong opening with clear eye contact', category: 'eyecontact' },
-      { timestamp: '0:42', text: 'You used a filler word during your transition', category: 'filler' },
-      { timestamp: '1:15', text: 'Speaking pace increased — consider slowing down', category: 'pacing' },
-      { timestamp: '1:48', text: 'Good pause before key statistic', category: 'pacing' },
-      { timestamp: '2:03', text: 'Another filler word detected', category: 'filler' },
-      { timestamp: '2:34', text: 'Excellent maintained eye contact in closing', category: 'eyecontact' }
-    ];
+      ...((breakdown.high_moments || []).map((item) => ({
+        timestamp: formatTimestamp(item.timestamp_seconds),
+        text: item.description || 'Strong moment',
+        category: 'eyecontact' as const,
+      }))),
+      ...((breakdown.low_moments || []).map((item) => ({
+        timestamp: formatTimestamp(item.timestamp_seconds),
+        text: item.description || 'Moment to improve',
+        category: 'pacing' as const,
+      }))),
+    ].sort((a, b) => timestampToSeconds(a.timestamp) - timestampToSeconds(b.timestamp));
+
+    const avgEngagement = engagementHistory.length
+      ? Math.round(
+          (engagementHistory.reduce((sum, item) => sum + Number(item.score || 0), 0) / engagementHistory.length) * 100
+        )
+      : null;
+    const score = Number.isFinite(breakdown.overall_score) ? Math.round(Number(breakdown.overall_score)) : 0;
+    const strengths = (breakdown.strengths || []).slice(0, 3);
+    const improvements = (breakdown.improvements || []).slice(0, 3);
+    const highs = (breakdown.high_moments || []).length;
+    const lows = (breakdown.low_moments || []).length;
+    const recordingUrl = sessionResult?.recordingUrl || null;
 
     const getCategoryColor = (category: string) => {
       switch (category) {
@@ -222,7 +278,7 @@ export default function App() {
             className="px-5 py-2 rounded-full"
             style={{ backgroundColor: '#E8B84B', color: '#1A1A1A', fontWeight: 500 }}
           >
-            Score: 74/100
+            Score: {score}/100
           </div>
         </div>
 
@@ -234,7 +290,9 @@ export default function App() {
             >
               <h2 className="mb-6" style={{ fontWeight: 500 }}>Feedback timeline</h2>
               <div className="space-y-4">
-                {feedbackItems.map((item, i) => (
+                {(feedbackItems.length ? feedbackItems : [
+                  { timestamp: '0:00', text: 'No detailed moment data was returned for this run.', category: 'pacing' as const }
+                ]).map((item, i) => (
                   <div key={i}>
                     <div className="flex items-start gap-3">
                       <div
@@ -271,23 +329,38 @@ export default function App() {
               className="rounded-2xl overflow-hidden"
               style={{ backgroundColor: '#2A2A3E', aspectRatio: '16/9' }}
             >
-              <div className="w-full h-full flex items-center justify-center">
-                <button
-                  className="w-20 h-20 rounded-full flex items-center justify-center"
-                  style={{ backgroundColor: '#E8B84B' }}
-                >
-                  <div
-                    style={{
-                      width: 0,
-                      height: 0,
-                      borderLeft: '20px solid #1A1A1A',
-                      borderTop: '12px solid transparent',
-                      borderBottom: '12px solid transparent',
-                      marginLeft: '4px'
-                    }}
-                  />
-                </button>
-              </div>
+              {recordingUrl ? (
+                <video
+                  ref={resultsVideoRef}
+                  src={recordingUrl}
+                  controls
+                  playsInline
+                  className="w-full h-full object-cover bg-black"
+                  onTimeUpdate={(event) => {
+                    const video = event.currentTarget;
+                    if (!video.duration) return;
+                    setProgress((video.currentTime / video.duration) * 100);
+                  }}
+                />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center">
+                  <button
+                    className="w-20 h-20 rounded-full flex items-center justify-center"
+                    style={{ backgroundColor: '#E8B84B' }}
+                  >
+                    <div
+                      style={{
+                        width: 0,
+                        height: 0,
+                        borderLeft: '20px solid #1A1A1A',
+                        borderTop: '12px solid transparent',
+                        borderBottom: '12px solid transparent',
+                        marginLeft: '4px'
+                      }}
+                    />
+                  </button>
+                </div>
+              )}
             </div>
 
             <div className="px-4">
@@ -295,10 +368,13 @@ export default function App() {
                 className="w-full h-2 rounded-full overflow-hidden cursor-pointer"
                 style={{ backgroundColor: 'rgba(26, 26, 26, 0.1)' }}
                 onClick={(e) => {
+                  const video = resultsVideoRef.current;
+                  if (!video || !video.duration) return;
                   const rect = e.currentTarget.getBoundingClientRect();
                   const x = e.clientX - rect.left;
                   const newProgress = (x / rect.width) * 100;
                   setProgress(newProgress);
+                  video.currentTime = (newProgress / 100) * video.duration;
                 }}
               >
                 <div
@@ -346,7 +422,13 @@ export default function App() {
             </div>
 
             <button
-              onClick={() => setCurrentScreen('landing')}
+              onClick={() => {
+                if (sessionResult?.recordingUrl) {
+                  URL.revokeObjectURL(sessionResult.recordingUrl);
+                }
+                setSessionResult(null);
+                setCurrentScreen('landing');
+              }}
               className="w-full py-4 rounded-full"
               style={{
                 backgroundColor: '#E8B84B',
@@ -365,10 +447,12 @@ export default function App() {
               style={{ backgroundColor: '#FFFFFF', border: '0.5px solid rgba(26, 26, 26, 0.1)' }}
             >
               <h3 className="mb-2 opacity-60">Pace</h3>
-              <div className="text-4xl mb-1" style={{ fontWeight: 500 }}>142 wpm</div>
-              <p className="text-sm opacity-60 mb-4">Ideal: 130–160 wpm</p>
+              <div className="text-4xl mb-1" style={{ fontWeight: 500 }}>
+                {avgEngagement !== null ? `${avgEngagement}%` : '--'}
+              </div>
+              <p className="text-sm opacity-60 mb-4">Average engagement across the session</p>
               <div className="flex gap-1 h-12 items-end">
-                {[30, 50, 70, 85, 95, 80, 75, 90].map((height, i) => (
+                {(engagementHistory.length ? engagementHistory.slice(-8).map((entry) => Math.max(8, Math.round(Number(entry.score || 0) * 100))) : [25, 35, 45, 55, 60, 58, 62, 68]).map((height, i) => (
                   <div
                     key={i}
                     className="flex-1 rounded-t"
@@ -383,10 +467,11 @@ export default function App() {
               style={{ backgroundColor: '#FFFFFF', border: '0.5px solid rgba(26, 26, 26, 0.1)' }}
             >
               <h3 className="mb-2 opacity-60">Filler words</h3>
-              <div className="text-4xl mb-3" style={{ fontWeight: 500 }}>3</div>
+              <div className="text-4xl mb-3" style={{ fontWeight: 500 }}>{improvements.length}</div>
               <div className="space-y-1" style={{ color: '#E8B84B' }}>
-                <div>uh × 2</div>
-                <div>um × 1</div>
+                {improvements.length ? improvements.map((item, index) => (
+                  <div key={index}>{item}</div>
+                )) : <div>No improvement notes returned</div>}
               </div>
             </div>
 
@@ -414,12 +499,12 @@ export default function App() {
                       strokeWidth="8"
                       fill="none"
                       strokeDasharray={`${2 * Math.PI * 56}`}
-                      strokeDashoffset={`${2 * Math.PI * 56 * (1 - 0.98)}`}
+                      strokeDashoffset={`${2 * Math.PI * 56 * (1 - score / 100)}`}
                       strokeLinecap="round"
                     />
                   </svg>
                   <div className="absolute inset-0 flex items-center justify-center text-3xl" style={{ fontWeight: 500 }}>
-                    98%
+                    {score}%
                   </div>
                 </div>
               </div>
@@ -434,9 +519,32 @@ export default function App() {
             >
               <h3 className="mb-2" style={{ color: '#E8B84B', fontWeight: 500 }}>Key insight</h3>
               <p className="text-sm leading-relaxed">
-                Your strongest moments came when you paused before key statistics — consider
-                using this technique more consistently throughout.
+                {breakdown.next_session_focus || breakdown.argument_feedback || 'No final coaching summary was returned for this session.'}
               </p>
+            </div>
+
+            <div
+              className="p-6 rounded-2xl"
+              style={{ backgroundColor: '#FFFFFF', border: '0.5px solid rgba(26, 26, 26, 0.1)' }}
+            >
+              <h3 className="mb-2 opacity-60">Strengths</h3>
+              <div className="space-y-2">
+                {strengths.length ? strengths.map((item, index) => (
+                  <div key={index}>{item}</div>
+                )) : <div className="opacity-60">No strengths returned</div>}
+              </div>
+            </div>
+
+            <div
+              className="p-6 rounded-2xl"
+              style={{ backgroundColor: '#FFFFFF', border: '0.5px solid rgba(26, 26, 26, 0.1)' }}
+            >
+              <h3 className="mb-2 opacity-60">Session shape</h3>
+              <div className="space-y-1 opacity-80">
+                <div>High moments: {highs}</div>
+                <div>Low moments: {lows}</div>
+                <div>Audience size: {sessionConfig.audienceCount}</div>
+              </div>
             </div>
           </div>
         </div>
@@ -445,4 +553,16 @@ export default function App() {
   }
 
   return null;
+}
+
+function formatTimestamp(seconds?: number) {
+  const total = Math.max(0, Math.round(Number(seconds || 0)));
+  const mins = Math.floor(total / 60);
+  const remainder = total % 60;
+  return `${mins}:${String(remainder).padStart(2, '0')}`;
+}
+
+function timestampToSeconds(value: string) {
+  const [mins, secs] = value.split(':').map(Number);
+  return (mins || 0) * 60 + (secs || 0);
 }

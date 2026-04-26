@@ -104,6 +104,7 @@ async def websocket_endpoint(
     user_id: str = Query(...),
     scenario: SCENARIO = Query("pitch"),
     target_duration: int = Query(300, ge=30, le=3600),
+    audience_size: int = Query(8, ge=1, le=20),
 ) -> None:
     await websocket.accept()
     ACTIVE_WEBSOCKETS.add(websocket)
@@ -112,6 +113,7 @@ async def websocket_endpoint(
         user_id=user_id,
         scenario=scenario,
         target_duration=target_duration,
+        audience_size=audience_size,
     )
     session.session_id = session_id
 

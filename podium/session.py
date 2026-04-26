@@ -77,13 +77,19 @@ class SessionState:
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     @classmethod
-    def from_config(cls, user_id: str, scenario: str, target_duration: int) -> "SessionState":
+    def from_config(
+        cls,
+        user_id: str,
+        scenario: str,
+        target_duration: int,
+        audience_size: int = 8,
+    ) -> "SessionState":
         if scenario not in SCENARIOS:
             raise ValueError(f"Unsupported scenario: {scenario}")
         if target_duration <= 0:
             raise ValueError("target_duration must be positive")
 
-        audience_size = 8
+        audience_size = max(1, min(20, int(audience_size)))
         avatar_states: dict[str, str] = {}
         avatar_stubbornness: dict[str, float] = {}
 

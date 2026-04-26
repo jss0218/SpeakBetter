@@ -111,6 +111,143 @@ def _safe_json_parse(raw: str | None) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+def _snippet(text: str, word_limit: int = 14) -> str:
+    words = (text or "").split()
+    if not words:
+        return ""
+    if len(words) <= word_limit:
+        return " ".join(words)
+    return " ".join(words[:word_limit]).strip() + "..."
+
+
+def _build_fallback_moments(session_snapshot: dict) -> tuple[list[dict], list[dict]]:
+    transcript_entries = [
+        entry for entry in session_snapshot.get("transcript", [])
+        if isinstance(entry, dict) and str(entry.get("text", "")).strip()
+    ]
+    engagement_history = [
+        entry for entry in session_snapshot.get("engagement_history", [])
+        if isinstance(entry, dict)
+    ]
+
+    high_moments: list[dict] = []
+    low_moments: list[dict] = []
+
+    for entry in engagement_history:
+        score = float(entry.get("score", 0.0))
+        timestamp = float(entry.get("timestamp", 0.0))
+        signal = str(entry.get("dominant_signal", "")).strip()
+        if score >= 0.7 and len(high_moments) < 2:
+            high_moments.append(
+                {
+                    "timestamp_seconds": round(timestamp, 1),
+                    "description": f"Audience engagement climbed during {signal.replace('_', ' ') or 'a strong section'}.",
+                    "transcript_snippet": "",
+                }
+            )
+        elif score <= 0.42 and len(low_moments) < 2:
+            low_moments.append(
+                {
+                    "timestamp_seconds": round(timestamp, 1),
+                    "description": f"Engagement dropped during {signal.replace('_', ' ') or 'a weaker stretch'}.",
+                    "transcript_snippet": "",
+                }
+            )
+
+    for entry in transcript_entries:
+        text = str(entry.get("text", "")).strip()
+        timestamp = float(entry.get("timestamp", 0.0))
+        cumulative_fillers = int(entry.get("cumulative_fillers", 0))
+        lowered = text.lower()
+
+        if len(high_moments) < 3 and len(text.split()) >= 8 and cumulative_fillers <= 2:
+            high_moments.append(
+                {
+                    "timestamp_seconds": round(timestamp, 1),
+                    "description": "Clear, sustained delivery landed well here.",
+                    "transcript_snippet": _snippet(text),
+                }
+            )
+
+        if len(low_moments) < 3 and (
+            any(token in lowered for token in [" um ", " uh ", " like ", " you know ", " i mean "])
+            or len(text.split()) <= 4
+        ):
+            low_moments.append(
+                {
+                    "timestamp_seconds": round(timestamp, 1),
+                    "description": "This section sounded less polished and likely weakened momentum.",
+                    "transcript_snippet": _snippet(text),
+                }
+            )
+
+        if len(high_moments) >= 3 and len(low_moments) >= 3:
+            break
+
+    if not high_moments and transcript_entries:
+        first = transcript_entries[0]
+        high_moments.append(
+            {
+                "timestamp_seconds": round(float(first.get("timestamp", 0.0)), 1),
+                "description": "You established the session with a usable opening.",
+                "transcript_snippet": _snippet(str(first.get("text", ""))),
+            }
+        )
+
+    if not low_moments and transcript_entries:
+        last = transcript_entries[-1]
+        low_moments.append(
+            {
+                "timestamp_seconds": round(float(last.get("timestamp", 0.0)), 1),
+                "description": "The close still needed sharper evidence and cleaner phrasing.",
+                "transcript_snippet": _snippet(str(last.get("text", ""))),
+            }
+        )
+
+    def dedupe(moments: list[dict]) -> list[dict]:
+        seen: set[tuple[int, str]] = set()
+        cleaned: list[dict] = []
+        for moment in moments:
+            key = (int(float(moment.get("timestamp_seconds", 0.0))), str(moment.get("description", "")))
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(moment)
+        return cleaned[:3]
+
+    return dedupe(high_moments), dedupe(low_moments)
+
+
+def _normalize_breakdown(parsed: dict, session_snapshot: dict) -> dict:
+    fallback = fallback_breakdown(session_snapshot)
+    normalized = dict(fallback)
+    normalized.update({k: v for k, v in parsed.items() if v is not None})
+
+    high_moments = normalized.get("high_moments")
+    low_moments = normalized.get("low_moments")
+    if not isinstance(high_moments, list) or not high_moments:
+        normalized["high_moments"] = fallback["high_moments"]
+    if not isinstance(low_moments, list) or not low_moments:
+        normalized["low_moments"] = fallback["low_moments"]
+
+    for key in ["strengths", "improvements"]:
+        value = normalized.get(key)
+        if not isinstance(value, list) or not value:
+            normalized[key] = fallback[key]
+
+    if not normalized.get("next_session_focus"):
+        normalized["next_session_focus"] = fallback["next_session_focus"]
+    if not normalized.get("argument_feedback"):
+        normalized["argument_feedback"] = fallback["argument_feedback"]
+
+    try:
+        normalized["overall_score"] = int(max(0, min(100, round(float(normalized.get("overall_score", fallback["overall_score"]))))))
+    except Exception:
+        normalized["overall_score"] = fallback["overall_score"]
+
+    return normalized
+
+
 async def generate_realtime_tip(
     recent_transcript: str,
     dominant_signal: str,
@@ -232,7 +369,7 @@ async def generate_session_breakdown(session_snapshot: dict) -> dict:
     parsed = _safe_json_parse(raw)
     if not parsed:
         return fallback_breakdown(session_snapshot)
-    return parsed
+    return _normalize_breakdown(parsed, session_snapshot)
 
 
 def fallback_breakdown(session_snapshot: dict) -> dict:
@@ -273,10 +410,12 @@ def fallback_breakdown(session_snapshot: dict) -> dict:
     while len(improvements) < 3:
         improvements.append("Tighten claim-evidence links for stronger arguments")
 
+    high_moments, low_moments = _build_fallback_moments(session_snapshot)
+
     return {
         "overall_score": overall_score,
-        "high_moments": [],
-        "low_moments": [],
+        "high_moments": high_moments,
+        "low_moments": low_moments,
         "strengths": strengths[:3],
         "improvements": improvements[:3],
         "next_session_focus": "Deliver stronger evidence for each major claim.",
