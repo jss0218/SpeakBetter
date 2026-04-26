@@ -6,6 +6,7 @@ motor
 pymongo
 uagents
 httpx
+openai
 pydantic
 python-multipart
 ollama
