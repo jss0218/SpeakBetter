@@ -571,6 +571,8 @@
       .video-frame { min-height: 300px; }
     }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
 </head>
 <body>
   <div class="shell">
@@ -629,6 +631,8 @@
               <div class="badge">Eye contact <strong id="eyeContactBadge">--</strong></div>
               <div class="badge">Motion <strong id="motionBadge">--</strong></div>
               <div class="badge">Face <strong id="faceBadge">--</strong></div>
+              <div class="badge">Posture <strong id="postureBadge">--</strong></div>
+              <div class="badge">Expression <strong id="expressionBadge">--</strong></div>
             </div>
           </div>
         </div>
@@ -798,6 +802,9 @@
       lastVisionPayload: null,
       lastEngagement: null,
       demoAngle: 0,
+      visionCalibrationSamples: [],
+      visionCalibrationSent: false,
+      visionCalibrationUntil: 0,
       transcriptParts: [],
       latestQuestionAudio: '',
     };
@@ -924,53 +931,228 @@
       return Math.max(low, Math.min(high, value));
     }
 
-    function frameStats() {
-      if (!videoEl.videoWidth || !videoEl.videoHeight) {
-        return { eyeContact: 0.5, motion: 0, faceDetected: false };
+    // ─── MediaPipe ─────────────────────────────────────────────────────────────
+    const mpState = {
+      faceMesh: null, pose: null,
+      faceResults: null, poseResults: null,
+      ready: false, rafId: null, sending: false,
+      frameCount: 0, irisHistory: [], wristHistory: [],
+      lastSentAt: 0, frameIntervalMs: 125,
+    };
+
+    async function initMediaPipe() {
+      try {
+        if (typeof FaceMesh === 'undefined' || typeof Pose === 'undefined') return;
+        mpState.faceMesh = new FaceMesh({
+          locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${f}`,
+        });
+        mpState.faceMesh.setOptions({ maxNumFaces: 1, refineLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        mpState.faceMesh.onResults((r) => { mpState.faceResults = r; });
+
+        mpState.pose = new Pose({
+          locateFile: (f) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${f}`,
+        });
+        mpState.pose.setOptions({ modelComplexity: 0, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        mpState.pose.onResults((r) => { mpState.poseResults = r; });
+
+        await mpState.faceMesh.initialize();
+        await mpState.pose.initialize();
+        mpState.ready = true;
+        startMpLoop();
+      } catch (e) { console.warn('MediaPipe init failed:', e); }
+    }
+
+    function startMpLoop() {
+      async function loop() {
+        mpState.rafId = requestAnimationFrame(loop);
+        if (mpState.sending || !videoEl.videoWidth || !videoEl.videoHeight) return;
+        const now = performance.now();
+        if (now - mpState.lastSentAt < mpState.frameIntervalMs) return;
+        mpState.lastSentAt = now;
+        mpState.sending = true;
+        try {
+          mpState.frameCount++;
+          await mpState.faceMesh.send({ image: videoEl });
+          if (mpState.frameCount % 3 === 0) await mpState.pose.send({ image: videoEl });
+        } catch (_) {}
+        mpState.sending = false;
+      }
+      loop();
+    }
+
+    function stopMpLoop() {
+      if (mpState.rafId) { cancelAnimationFrame(mpState.rafId); mpState.rafId = null; }
+    }
+
+    function classifyExpression(features) {
+      const {
+        smileScore, browFurrow, mouthOpen, eyeOpen, browRaise,
+        smileWidth, smileAsymmetry, headPitch, eyeContact,
+      } = features;
+
+      if (mouthOpen > 0.62 && eyeOpen > 0.58 && browRaise > 0.52) return 'surprised';
+      if (browFurrow > 0.62 && mouthOpen > 0.38 && eyeOpen > 0.46) return 'scared';
+      if (browFurrow > 0.58 && smileScore < 0.22) return 'tense';
+      if (smileScore > 0.58 && smileWidth > 0.42 && smileAsymmetry < 0.32) return 'happy';
+      if (smileScore > 0.42 && (smileAsymmetry > 0.35 || browFurrow > 0.36)) return 'nervous_smile';
+      if (browFurrow > 0.36 && headPitch > 0.08) return 'concerned';
+      if (eyeContact > 0.68 && browFurrow < 0.34 && mouthOpen < 0.34) return 'focused';
+      if (smileScore > 0.28) return 'engaged';
+      if (eyeOpen < 0.24 && smileScore < 0.18) return 'flat';
+      return 'neutral';
+    }
+
+    function computeFromMediaPipe() {
+      let eyeContact = 0.5, motion = 0, faceDetected = false;
+      let gesture = false, postureScore = 0.5, browFurrow = 0, smileScore = 0, expression = 'neutral';
+      let mouthOpen = 0, eyeOpen = 0, browRaise = 0, smileWidth = 0, smileAsymmetry = 0;
+      let headYaw = 0, headPitch = 0, headRoll = 0, faceSize = 0, handMotion = 0, visionConfidence = 0.35;
+
+      const fr = mpState.faceResults;
+      if (fr && fr.multiFaceLandmarks && fr.multiFaceLandmarks.length > 0) {
+        faceDetected = true;
+        visionConfidence = 0.75;
+        const lm = fr.multiFaceLandmarks[0];
+
+        // Eye contact: iris deviation from eye socket center (landmarks 468/473 = refined iris)
+        const li = lm[468], ri = lm[473];
+        const lo = lm[33], lc = lm[133], ro = lm[362], rc = lm[263];
+        if (li && ri && lo && lc && ro && rc) {
+          const lCx = (lo.x + lc.x) / 2, rCx = (ro.x + rc.x) / 2;
+          const lDev = Math.abs(li.x - lCx) / Math.max(0.001, Math.abs(lo.x - lc.x));
+          const rDev = Math.abs(ri.x - rCx) / Math.max(0.001, Math.abs(ro.x - rc.x));
+          eyeContact = clamp(1 - (lDev + rDev) / 2 * 3, 0.1, 1);
+          headRoll = (lo.y - ro.y) / Math.max(0.001, Math.abs(lo.x - ro.x));
+
+          // Eye dart: rolling variance of iris x-position
+          const irisX = (li.x + ri.x) / 2;
+          mpState.irisHistory.push(irisX);
+          if (mpState.irisHistory.length > 15) mpState.irisHistory.shift();
+          if (mpState.irisHistory.length >= 5) {
+            const range = Math.max(...mpState.irisHistory) - Math.min(...mpState.irisHistory);
+            motion = clamp(range * 20, 0, 1);
+          }
+        }
+
+        const nose = lm[1], leftCheek = lm[234], rightCheek = lm[454], chin = lm[152], forehead = lm[10];
+        if (nose && leftCheek && rightCheek && chin && forehead) {
+          const faceWidth = Math.max(0.001, Math.abs(leftCheek.x - rightCheek.x));
+          const faceHeight = Math.max(0.001, Math.abs(forehead.y - chin.y));
+          const centerX = (leftCheek.x + rightCheek.x) / 2;
+          const centerY = (forehead.y + chin.y) / 2;
+          headYaw = (nose.x - centerX) / faceWidth;
+          headPitch = (nose.y - centerY) / faceHeight;
+          faceSize = faceWidth * faceHeight;
+          visionConfidence = clamp(visionConfidence + Math.min(0.2, faceSize), 0, 1);
+        }
+
+        // Mouth and smile shape
+        const ml = lm[61], mr = lm[291], ul = lm[13], ll = lm[14];
+        if (ml && mr && ul && ll) {
+          const mouthWidth = Math.max(0.001, Math.abs(ml.x - mr.x));
+          const mouthHeight = Math.abs(ul.y - ll.y);
+          const cornerY = (ml.y + mr.y) / 2;
+          smileScore = clamp((ul.y - cornerY) * 15, 0, 1);
+          mouthOpen = clamp((mouthHeight / mouthWidth - 0.08) * 3.5, 0, 1);
+          smileWidth = clamp((mouthWidth - 0.08) * 6, 0, 1);
+          smileAsymmetry = clamp(Math.abs(ml.y - mr.y) / mouthWidth * 2, 0, 1);
+        }
+
+        // Eye openness and brow position
+        const lb = lm[107], rb = lm[336], let2 = lm[159], ret2 = lm[386], leb = lm[145], reb = lm[374];
+        if (lb && rb && let2 && ret2 && leb && reb && lo && lc && ro && rc) {
+          const leftEyeWidth = Math.max(0.001, Math.abs(lo.x - lc.x));
+          const rightEyeWidth = Math.max(0.001, Math.abs(ro.x - rc.x));
+          const leftEyeOpen = Math.abs(let2.y - leb.y) / leftEyeWidth;
+          const rightEyeOpen = Math.abs(ret2.y - reb.y) / rightEyeWidth;
+          const avgEyeOpen = (leftEyeOpen + rightEyeOpen) / 2;
+          const browGap = (Math.abs(lb.y - let2.y) + Math.abs(rb.y - ret2.y)) / 2;
+          eyeOpen = clamp((avgEyeOpen - 0.14) * 5, 0, 1);
+          browFurrow = clamp(1 - browGap * 20, 0, 1);
+          browRaise = clamp((browGap - 0.045) * 18, 0, 1);
+        }
+
+        expression = classifyExpression({
+          smileScore, browFurrow, mouthOpen, eyeOpen, browRaise,
+          smileWidth, smileAsymmetry, headPitch, eyeContact,
+        });
       }
 
-      canvas.width = 160;
-      canvas.height = 120;
-      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
-      const image = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-
-      let total = 0;
-      let center = 0;
-      let motion = 0;
-      const centerStartX = Math.floor(canvas.width * 0.3);
-      const centerEndX = Math.floor(canvas.width * 0.7);
-      const centerStartY = Math.floor(canvas.height * 0.2);
-      const centerEndY = Math.floor(canvas.height * 0.8);
-
-      for (let y = 0; y < canvas.height; y++) {
-        for (let x = 0; x < canvas.width; x++) {
-          const idx = (y * canvas.width + x) * 4;
-          const brightness = (image[idx] + image[idx + 1] + image[idx + 2]) / 3;
-          total += brightness;
-          if (x >= centerStartX && x <= centerEndX && y >= centerStartY && y <= centerEndY) {
-            center += brightness;
+      const pr = mpState.poseResults;
+      if (pr && pr.poseLandmarks) {
+        const pl = pr.poseLandmarks;
+        const ls = pl[11], rs = pl[12], nose = pl[0], lw = pl[15], rw = pl[16];
+        if (ls && rs) {
+          const levelScore = clamp(1 - Math.abs(ls.y - rs.y) * 10, 0, 1);
+          const midX = (ls.x + rs.x) / 2, midY = (ls.y + rs.y) / 2;
+          const leanScore = nose ? clamp(1 - Math.abs(nose.x - midX) * 5, 0, 1) : 0.5;
+          const vertScore = nose ? clamp(1 - Math.abs(nose.y - midY + 0.15) * 8, 0, 1) : 0.5;
+          postureScore = clamp(levelScore * 0.35 + leanScore * 0.35 + vertScore * 0.3, 0, 1);
+          if (lw && rw) {
+            const wristSpread = Math.abs(lw.x - rw.x) + Math.abs(lw.y - rw.y);
+            const wristMid = { x: (lw.x + rw.x) / 2, y: (lw.y + rw.y) / 2 };
+            mpState.wristHistory.push(wristMid);
+            if (mpState.wristHistory.length > 12) mpState.wristHistory.shift();
+            if (mpState.wristHistory.length >= 2) {
+              let totalDelta = 0;
+              for (let i = 1; i < mpState.wristHistory.length; i++) {
+                totalDelta += Math.hypot(
+                  mpState.wristHistory[i].x - mpState.wristHistory[i - 1].x,
+                  mpState.wristHistory[i].y - mpState.wristHistory[i - 1].y
+                );
+              }
+              handMotion = clamp(totalDelta * 5, 0, 1);
+            }
+            gesture = wristSpread > 0.3 || handMotion > 0.08;
           }
         }
       }
 
+      motion = clamp(Math.max(motion, handMotion * 0.7), 0, 1);
+      return {
+        eyeContact, motion, faceDetected, gesture, postureScore, browFurrow, smileScore, expression,
+        headYaw, headPitch, headRoll, faceSize, handMotion, visionConfidence,
+      };
+    }
+
+    function frameStats() {
+      if (mpState.ready && mpState.faceResults) return computeFromMediaPipe();
+
+      // Brightness fallback when MediaPipe hasn't loaded yet
+      if (!videoEl.videoWidth || !videoEl.videoHeight) {
+        return {
+          eyeContact: 0.5, motion: 0, faceDetected: false, gesture: false, postureScore: 0.5,
+          browFurrow: 0, smileScore: 0, expression: 'unknown', headYaw: 0, headPitch: 0,
+          headRoll: 0, faceSize: 0, handMotion: 0, visionConfidence: 0,
+        };
+      }
+      canvas.width = 160; canvas.height = 120;
+      ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+      const image = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let total = 0, center = 0, motion = 0;
+      const cx0 = Math.floor(canvas.width * 0.3), cx1 = Math.floor(canvas.width * 0.7);
+      const cy0 = Math.floor(canvas.height * 0.2), cy1 = Math.floor(canvas.height * 0.8);
+      for (let y = 0; y < canvas.height; y++) for (let x = 0; x < canvas.width; x++) {
+        const idx = (y * canvas.width + x) * 4;
+        const b = (image[idx] + image[idx+1] + image[idx+2]) / 3;
+        total += b;
+        if (x >= cx0 && x <= cx1 && y >= cy0 && y <= cy1) center += b;
+      }
       if (state.lastFrame) {
         for (let i = 0; i < image.length; i += 8) {
-          motion += Math.abs(image[i] - state.lastFrame[i]) + Math.abs(image[i + 1] - state.lastFrame[i + 1]) + Math.abs(image[i + 2] - state.lastFrame[i + 2]);
+          motion += Math.abs(image[i] - state.lastFrame[i]) + Math.abs(image[i+1] - state.lastFrame[i+1]) + Math.abs(image[i+2] - state.lastFrame[i+2]);
         }
       }
-
       state.lastFrame = new Uint8ClampedArray(image);
-
-      const totalPixels = canvas.width * canvas.height;
-      const centerPixels = (centerEndX - centerStartX) * (centerEndY - centerStartY);
-      const avg = total / totalPixels;
-      const centerAvg = center / Math.max(1, centerPixels);
+      const avg = total / (canvas.width * canvas.height);
+      const centerAvg = center / Math.max(1, (cx1-cx0) * (cy1-cy0));
       const motionScore = clamp(motion / (image.length * 0.6), 0, 1);
-      const eyeContact = clamp(1 - Math.abs(centerAvg - avg) / 140 + (faceDetectedBias() * 0.08), 0.1, 1);
+      const eyeContact = clamp(1 - Math.abs(centerAvg - avg) / 140 + 0.08, 0.1, 1);
       return {
-        eyeContact,
-        motion: motionScore,
-        faceDetected: true,
+        eyeContact, motion: motionScore, faceDetected: true, gesture: motionScore > 0.12,
+        postureScore: 0.5, browFurrow: 0, smileScore: 0, expression: 'unknown',
+        headYaw: 0, headPitch: 0, headRoll: 0, faceSize: 0.2, handMotion: motionScore,
+        visionConfidence: 0.35,
       };
     }
 
@@ -983,6 +1165,8 @@
       eyeContactBadge.textContent = `${Math.round(payload.eye_contact * 100)}%`;
       motionBadge.textContent = `${Math.round((payload.motion_score ?? 0) * 100)}%`;
       faceBadge.textContent = payload.face_detected ? 'yes' : 'no';
+      el('postureBadge').textContent = `${Math.round((payload.posture_score ?? 0.5) * 100)}%`;
+      el('expressionBadge').textContent = payload.expression || 'neutral';
       visionLevel.textContent = `${Math.round((payload.eye_contact ?? 0) * 100)}%`;
       statVision.textContent = payload.face_detected ? 'camera live' : 'no face';
     }
@@ -1000,12 +1184,33 @@
           type: 'vision_update',
           eye_contact: stats.eyeContact,
           face_detected: stats.faceDetected,
-          gesture_detected: stats.motion > 0.12,
+          gesture_detected: Boolean(stats.gesture),
           timestamp: Date.now() / 1000,
           motion_score: stats.motion,
+          posture_score: stats.postureScore ?? 0.5,
+          brow_furrow: stats.browFurrow ?? 0,
+          smile_score: stats.smileScore ?? 0,
+          expression: stats.expression || 'neutral',
+          head_yaw: stats.headYaw ?? 0,
+          head_pitch: stats.headPitch ?? 0,
+          head_roll: stats.headRoll ?? 0,
+          face_size: stats.faceSize ?? 0,
+          hand_motion: stats.handMotion ?? 0,
+          vision_confidence: stats.visionConfidence ?? 0.5,
         };
 
         state.socket.send(JSON.stringify(payload));
+        if (!state.visionCalibrationSent && Date.now() <= state.visionCalibrationUntil) {
+          state.visionCalibrationSamples.push(payload);
+        } else if (!state.visionCalibrationSent && state.visionCalibrationSamples.length >= 8) {
+          state.socket.send(JSON.stringify({
+            type: 'vision_calibration',
+            samples: state.visionCalibrationSamples,
+            timestamp: Date.now() / 1000,
+          }));
+          state.visionCalibrationSent = true;
+          append('vision', 'Camera baseline calibrated.');
+        }
         updateVisionBadge(payload);
       }, 500);
     }
@@ -1086,7 +1291,22 @@
       startVisionLoop(() => {
         const motion = 0.35 + 0.25 * Math.abs(Math.sin(state.demoAngle));
         const eyeContact = clamp(0.55 + 0.25 * Math.sin(state.demoAngle * 1.2), 0.1, 0.95);
-        return { eyeContact, motion, faceDetected: true };
+        return {
+          eyeContact,
+          motion,
+          faceDetected: true,
+          gesture: motion > 0.22,
+          postureScore: 0.78,
+          browFurrow: 0.15,
+          smileScore: 0.35,
+          expression: 'neutral',
+          headYaw: 0,
+          headPitch: 0,
+          headRoll: 0,
+          faceSize: 0.22,
+          handMotion: motion * 0.4,
+          visionConfidence: 0.8,
+        };
       });
 
       setCameraState('Demo camera', 'ok');
@@ -1123,6 +1343,9 @@
         setSttState('STT listening...', 'warn');
         state.transcriptParts = [];
         state.latestQuestionAudio = '';
+        state.visionCalibrationSamples = [];
+        state.visionCalibrationSent = false;
+        state.visionCalibrationUntil = Date.now() + 5000;
         renderFinalTranscript();
         questionText.textContent = 'Speak for a bit, then stop the session to receive a voiced adversarial question.';
         questionAudioState.textContent = 'Waiting for question';
@@ -1130,7 +1353,19 @@
         window.setTimeout(markSttErrorIfSilent, 10000);
 
         try {
-          state.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: 'user' } });
+          state.mediaStream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
+            video: {
+              facingMode: 'user',
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+              frameRate: { ideal: 15, max: 24 },
+            },
+          });
 
           videoEl.srcObject = state.mediaStream;
           await videoEl.play();
@@ -1138,6 +1373,9 @@
           setAudioState('Mic live', 'ok');
 
           state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          if (state.audioContext.state === 'suspended') {
+            await state.audioContext.resume();
+          }
           state.sourceNode = state.audioContext.createMediaStreamSource(state.mediaStream);
           state.processorNode = state.audioContext.createScriptProcessor(4096, 1, 1);
 
@@ -1151,6 +1389,7 @@
 
           state.sourceNode.connect(state.processorNode);
           state.processorNode.connect(state.audioContext.destination);
+          initMediaPipe().catch((error) => append('vision_warning', error.message || String(error)));
 
           state.sessionActive = true;
           startBtn.disabled = true;
@@ -1253,6 +1492,7 @@
           clearInterval(state.visionTimer);
           state.visionTimer = null;
         }
+        stopMpLoop();
         append('socket', 'Closed');
         if (statusText.textContent !== 'Session complete.') {
           setStatus('Disconnected', 'warn');
@@ -1278,6 +1518,7 @@
         clearInterval(state.visionTimer);
         state.visionTimer = null;
       }
+      stopMpLoop();
       if (state.demoStream) {
         state.demoStream.getTracks().forEach((track) => track.stop());
         state.demoStream = null;

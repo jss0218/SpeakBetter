@@ -16,6 +16,12 @@ fusion_agent = create_podium_agent(
 class FusionInput(Model):
     session_id: str
     eye_contact_score: float
+    posture_score: float = 0.5
+    gesture_score: float = 0.4
+    motion_score: float = 0.0
+    brow_furrow: float = 0.0
+    smile_score: float = 0.0
+    expression: str = "neutral"
     filler_rate: float
     words_per_minute: float
     vocal_energy: float
@@ -23,6 +29,8 @@ class FusionInput(Model):
     elapsed_seconds: float
     energy_history: list[float]
     engagement_history: list[dict]
+    delivery_events: list[dict] = []
+    vision_confidence: float = 1.0
 
 
 class FusionOutput(Model):
@@ -37,6 +45,12 @@ class FusionOutput(Model):
 async def handle_fusion(ctx, sender, msg: FusionInput) -> None:
     score, dominant_signal, component_scores = calculate_engagement(
         eye_contact_score=msg.eye_contact_score,
+        posture_score=msg.posture_score,
+        gesture_score=msg.gesture_score,
+        motion_score=msg.motion_score,
+        brow_furrow=msg.brow_furrow,
+        smile_score=msg.smile_score,
+        expression=msg.expression,
         filler_rate=msg.filler_rate,
         words_per_minute=msg.words_per_minute,
         vocal_energy=msg.vocal_energy,
@@ -44,6 +58,8 @@ async def handle_fusion(ctx, sender, msg: FusionInput) -> None:
         elapsed_seconds=msg.elapsed_seconds,
         energy_history=msg.energy_history,
         engagement_history=msg.engagement_history,
+        delivery_events=msg.delivery_events,
+        vision_confidence=msg.vision_confidence,
     )
     trend = calculate_trend(msg.engagement_history + [{"score": score}])
 

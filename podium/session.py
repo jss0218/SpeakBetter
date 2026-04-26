@@ -38,6 +38,17 @@ class SessionState:
     face_detected: bool = False
     gesture_detected: bool = False
     gesture_history: list[bool] = field(default_factory=list)
+    gesture_score: float = 0.4
+    posture_score: float = 0.5
+    motion_score: float = 0.0
+    expression: str = "neutral"
+    brow_furrow: float = 0.0
+    smile_score: float = 0.0
+    vision_history: list[dict] = field(default_factory=list)
+    vision_calibration: dict = field(default_factory=dict)
+    vision_confidence: float = 0.0
+    delivery_events: list[dict] = field(default_factory=list)
+    calibrated_vision_scores: dict = field(default_factory=dict)
 
     engagement_score: float = 0.5
     engagement_history: list[dict] = field(default_factory=list)
@@ -60,6 +71,7 @@ class SessionState:
 
     coach_tips: list[dict] = field(default_factory=list)
     last_tip_timestamp: float = 0.0
+    last_vision_tip_signal: str = ""
     final_breakdown: Optional[dict] = None
 
     _lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
@@ -144,8 +156,36 @@ class SessionState:
             if len(self.energy_history) > 30:
                 self.energy_history = self.energy_history[-30:]
 
-    def update_vision(self, eye_contact: float, face_detected: bool, gesture: bool) -> None:
+    def update_vision(
+        self,
+        eye_contact: float,
+        face_detected: bool,
+        gesture: bool,
+        posture_score: float = 0.5,
+        motion_score: float = 0.0,
+        brow_furrow: float = 0.0,
+        smile_score: float = 0.0,
+        expression: str = "neutral",
+        head_yaw: float = 0.0,
+        head_pitch: float = 0.0,
+        head_roll: float = 0.0,
+        face_size: float = 0.0,
+        hand_motion: float = 0.0,
+        vision_confidence: float = 0.5,
+    ) -> None:
+        from podium.core.delivery import analyze_delivery
+        from podium.core.vision import calculate_gesture_score
+
+        now = self.get_elapsed_seconds()
         eye_contact = max(0.0, min(1.0, float(eye_contact)))
+        posture_score = max(0.0, min(1.0, float(posture_score)))
+        motion_score = max(0.0, min(1.0, float(motion_score)))
+        brow_furrow = max(0.0, min(1.0, float(brow_furrow)))
+        smile_score = max(0.0, min(1.0, float(smile_score)))
+        hand_motion = max(0.0, min(1.0, float(hand_motion)))
+        vision_confidence = max(0.0, min(1.0, float(vision_confidence)))
+        face_size = max(0.0, float(face_size))
+        expression = (expression or "neutral").strip().lower()[:40]
         with self._lock:
             self.eye_contact_score = 0.3 * eye_contact + 0.7 * self.eye_contact_score
             self.face_detected = bool(face_detected)
@@ -153,6 +193,57 @@ class SessionState:
             self.gesture_history.append(bool(gesture))
             if len(self.gesture_history) > 60:
                 self.gesture_history = self.gesture_history[-60:]
+            self.gesture_score = calculate_gesture_score(self.gesture_history)
+            self.posture_score = 0.35 * posture_score + 0.65 * self.posture_score
+            self.motion_score = 0.35 * motion_score + 0.65 * self.motion_score
+            self.brow_furrow = 0.35 * brow_furrow + 0.65 * self.brow_furrow
+            self.smile_score = 0.35 * smile_score + 0.65 * self.smile_score
+            self.vision_confidence = 0.35 * vision_confidence + 0.65 * self.vision_confidence
+            self.expression = expression
+            self.vision_history.append(
+                {
+                    "timestamp": now,
+                    "eye_contact": eye_contact,
+                    "face_detected": bool(face_detected),
+                    "gesture_detected": bool(gesture),
+                    "posture_score": posture_score,
+                    "motion_score": motion_score,
+                    "brow_furrow": brow_furrow,
+                    "smile_score": smile_score,
+                    "expression": expression,
+                    "head_yaw": float(head_yaw),
+                    "head_pitch": float(head_pitch),
+                    "head_roll": float(head_roll),
+                    "face_size": face_size,
+                    "hand_motion": hand_motion,
+                    "vision_confidence": vision_confidence,
+                }
+            )
+            if len(self.vision_history) > 240:
+                self.vision_history = self.vision_history[-240:]
+            delivery = analyze_delivery(
+                recent_vision=[
+                    entry for entry in self.vision_history if entry["timestamp"] >= now - 10
+                ],
+                calibration=self.vision_calibration,
+                scenario=self.scenario,
+            )
+            self.delivery_events = list(delivery.get("events", []))
+            self.calibrated_vision_scores = dict(delivery.get("calibrated_scores", {}))
+            self.vision_confidence = float(delivery.get("confidence", self.vision_confidence))
+
+    def update_vision_calibration(self, samples: list[dict]) -> None:
+        from podium.core.delivery import build_vision_calibration
+
+        calibration = build_vision_calibration(samples)
+        with self._lock:
+            if calibration.get("ready"):
+                self.vision_calibration = calibration
+
+    def get_recent_vision(self, seconds: int = 10) -> list[dict]:
+        with self._lock:
+            cutoff = self.get_elapsed_seconds() - max(1, seconds)
+            return [entry.copy() for entry in self.vision_history if entry["timestamp"] >= cutoff]
 
     def fire_pressure_event(self, event_name: str) -> None:
         with self._lock:
@@ -172,6 +263,13 @@ class SessionState:
                 "filler_count": self.filler_count,
                 "wpm": self.words_per_minute,
                 "eye_contact_score": self.eye_contact_score,
+                "posture_score": self.posture_score,
+                "gesture_score": self.gesture_score,
+                "motion_score": self.motion_score,
+                "expression": self.expression,
+                "vision_confidence": self.vision_confidence,
+                "delivery_events": list(self.delivery_events),
+                "calibrated_vision_scores": dict(self.calibrated_vision_scores),
             }
 
     def get_elapsed_seconds(self) -> float:
@@ -207,6 +305,17 @@ class SessionState:
                 "face_detected": self.face_detected,
                 "gesture_detected": self.gesture_detected,
                 "gesture_history": list(self.gesture_history),
+                "gesture_score": self.gesture_score,
+                "posture_score": self.posture_score,
+                "motion_score": self.motion_score,
+                "expression": self.expression,
+                "brow_furrow": self.brow_furrow,
+                "smile_score": self.smile_score,
+                "vision_history": list(self.vision_history),
+                "vision_calibration": dict(self.vision_calibration),
+                "vision_confidence": self.vision_confidence,
+                "delivery_events": list(self.delivery_events),
+                "calibrated_vision_scores": dict(self.calibrated_vision_scores),
                 "engagement_score": self.engagement_score,
                 "engagement_history": list(self.engagement_history),
                 "dominant_signal": self.dominant_signal,
@@ -224,5 +333,6 @@ class SessionState:
                 "user_qa_answer": self.user_qa_answer,
                 "coach_tips": list(self.coach_tips),
                 "last_tip_timestamp": self.last_tip_timestamp,
+                "last_vision_tip_signal": self.last_vision_tip_signal,
                 "final_breakdown": self.final_breakdown,
             }

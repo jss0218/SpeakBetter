@@ -36,6 +36,10 @@ Session data:
 - Total filler words: {filler_count}
 - Average WPM: {avg_wpm}
 - Average eye contact score: {avg_eye_contact}
+- Average posture score: {avg_posture}
+- Gesture score: {gesture_score}
+- Motion balance score: {motion_score}
+- Facial expression: {expression}
 - Argument gap identified: {weakest_claim}
 - Pressure events that fired: {pressure_events}
 
@@ -137,6 +141,61 @@ async def generate_realtime_tip(
     return " ".join(tip.split())
 
 
+def generate_vision_tip(
+    recent_vision: list[dict],
+    last_signal: str = "",
+    delivery_events: list[dict] | None = None,
+    vision_confidence: float = 1.0,
+) -> tuple[str | None, str]:
+    delivery_events = delivery_events or []
+    if delivery_events and vision_confidence >= 0.4:
+        event = delivery_events[0]
+        signal = str(event.get("name", ""))
+        tip = str(event.get("tip", "")).strip()
+        if tip and signal != last_signal:
+            return tip, signal
+        return None, last_signal
+
+    if len(recent_vision) < 8:
+        return None, last_signal
+
+    face_samples = [entry for entry in recent_vision if entry.get("face_detected")]
+    if len(face_samples) < max(4, len(recent_vision) // 2):
+        signal = "no_face"
+        if signal != last_signal:
+            return "Step back into frame so the audience can read you.", signal
+        return None, last_signal
+
+    count = len(face_samples)
+    avg_eye = sum(float(entry.get("eye_contact", 0.5)) for entry in face_samples) / count
+    avg_posture = sum(float(entry.get("posture_score", 0.5)) for entry in face_samples) / count
+    avg_motion = sum(float(entry.get("motion_score", 0.0)) for entry in face_samples) / count
+    avg_brow = sum(float(entry.get("brow_furrow", 0.0)) for entry in face_samples) / count
+    gesture_rate = sum(1 for entry in face_samples if entry.get("gesture_detected")) / count
+
+    candidates: list[tuple[str, str, float]] = []
+    if avg_eye < 0.4:
+        candidates.append(("low_eye_contact", "Look up from your notes and address the camera.", 0.4 - avg_eye))
+    if avg_posture < 0.45:
+        candidates.append(("poor_posture", "Straighten your shoulders and plant your stance.", 0.45 - avg_posture))
+    if gesture_rate < 0.08:
+        candidates.append(("stiff_gestures", "Use one deliberate hand gesture on your next point.", 0.08 - gesture_rate))
+    elif gesture_rate > 0.75:
+        candidates.append(("excessive_gestures", "Quiet your hands and hold still between points.", gesture_rate - 0.75))
+    if avg_motion > 0.55:
+        candidates.append(("fidgeting", "Reduce the swaying; reset your feet before continuing.", avg_motion - 0.55))
+    if avg_brow > 0.55:
+        candidates.append(("tense_expression", "Relax your brow so confidence shows on your face.", avg_brow - 0.55))
+
+    if not candidates:
+        return None, ""
+
+    signal, tip, _ = max(candidates, key=lambda item: item[2])
+    if signal == last_signal:
+        return None, last_signal
+    return tip, signal
+
+
 async def generate_session_breakdown(session_snapshot: dict) -> dict:
     engagement_history = session_snapshot.get("engagement_history", [])
     eye_samples = [
@@ -159,6 +218,10 @@ async def generate_session_breakdown(session_snapshot: dict) -> dict:
         filler_count=int(session_snapshot.get("filler_count", 0)),
         avg_wpm=round(float(session_snapshot.get("words_per_minute", 0.0)), 2),
         avg_eye_contact=round(float(session_snapshot.get("eye_contact_score", 0.0)), 3),
+        avg_posture=round(float(session_snapshot.get("posture_score", 0.0)), 3),
+        gesture_score=round(float(session_snapshot.get("gesture_score", 0.0)), 3),
+        motion_score=round(float(session_snapshot.get("motion_score", 0.0)), 3),
+        expression=session_snapshot.get("expression", "neutral"),
         weakest_claim=session_snapshot.get("weakest_claim", ""),
         pressure_events=json.dumps(
             session_snapshot.get("pressure_events_fired", []), ensure_ascii=True
@@ -178,6 +241,10 @@ def fallback_breakdown(session_snapshot: dict) -> dict:
     filler_count = int(session_snapshot.get("filler_count", 0))
     wpm = float(session_snapshot.get("words_per_minute", 0.0))
     eye = float(session_snapshot.get("eye_contact_score", 0.0))
+    posture = float(session_snapshot.get("posture_score", 0.5))
+    gesture = float(session_snapshot.get("gesture_score", 0.4))
+    motion = float(session_snapshot.get("motion_score", 0.0))
+    brow = float(session_snapshot.get("brow_furrow", 0.0))
 
     strengths: list[str] = []
     improvements: list[str] = []
@@ -194,6 +261,14 @@ def fallback_breakdown(session_snapshot: dict) -> dict:
         improvements.append("Slow down slightly to improve clarity")
     if eye < 0.6:
         improvements.append("Improve eye contact consistency with the camera")
+    if posture < 0.55:
+        improvements.append("Stand taller and keep shoulders level")
+    if gesture < 0.5:
+        improvements.append("Use deliberate hand gestures to emphasize key points")
+    if motion > 0.55:
+        improvements.append("Reduce swaying and reset your feet between points")
+    if brow > 0.55:
+        improvements.append("Relax facial tension so confidence reads clearly")
 
     while len(improvements) < 3:
         improvements.append("Tighten claim-evidence links for stronger arguments")

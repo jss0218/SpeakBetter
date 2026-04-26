@@ -17,13 +17,12 @@ def calculate_gesture_score(gesture_history: list[bool]) -> float:
 
     recent = gesture_history[-60:]
     gestures = sum(1 for g in recent if g)
-    duration_minutes = max(len(recent) / 60.0, 1 / 60.0)
-    gpm = gestures / duration_minutes
+    gesture_rate = gestures / max(1, len(recent))
 
-    if gpm == 0:
+    if gesture_rate == 0:
         return 0.4
-    if 2 <= gpm <= 6:
+    if 0.08 <= gesture_rate <= 0.45:
         return 1.0
-    if 6 < gpm <= 10:
+    if 0.45 < gesture_rate <= 0.65:
         return 0.7
     return 0.4
