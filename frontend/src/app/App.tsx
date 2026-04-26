@@ -88,7 +88,7 @@ export default function App() {
     setChatMessages(prev => [...prev, { role: 'user', content: question }]);
     setChatLoading(true);
     try {
-      const backendBase = import.meta.env.VITE_PODIUM_BACKEND_URL || 'http://localhost:8001';
+      const backendBase = import.meta.env.VITE_PODIUM_BACKEND_URL || 'http://localhost:8000';
       const res = await fetch(`${backendBase}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -97,8 +97,14 @@ export default function App() {
           session_context: { breakdown: sessionResult?.breakdown || {} },
         }),
       });
+      if (!res.ok) {
+        throw new Error(`chat_failed_${res.status}`);
+      }
       const data = await res.json();
-      setChatMessages(prev => [...prev, { role: 'assistant', content: data.answer }]);
+      const answer = typeof data.answer === 'string' && data.answer.trim()
+        ? data.answer.trim()
+        : 'I could not generate a useful follow-up answer.';
+      setChatMessages(prev => [...prev, { role: 'assistant', content: answer }]);
     } catch {
       setChatMessages(prev => [...prev, { role: 'assistant', content: 'Could not reach the coach. Please try again.' }]);
     } finally {

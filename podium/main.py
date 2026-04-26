@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Literal
@@ -8,6 +9,7 @@ from fastapi import FastAPI, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
+from pydantic import BaseModel
 from starlette.websockets import WebSocketDisconnect
 
 from podium.agents.argument_agent import argument_agent
@@ -16,6 +18,7 @@ from podium.agents.coach_agent import coach_agent
 from podium.agents.fusion_agent import fusion_agent
 from podium.agents.speech_agent import speech_agent
 from podium.agents.vision_agent import vision_agent
+from podium.core.argument import call_groq
 from podium.db.mongo import connect, disconnect
 from podium.session import SessionState
 from podium.websocket_handler import handle_session
@@ -38,6 +41,30 @@ app.add_middleware(
 
 ACTIVE_WEBSOCKETS: set[WebSocket] = set()
 SCENARIO = Literal["pitch", "interview", "presentation"]
+
+
+class ChatRequest(BaseModel):
+    question: str
+    session_context: dict = {}
+
+
+class ChatResponse(BaseModel):
+    answer: str
+
+
+CHAT_PROMPT = """
+You are a direct public speaking coach answering a post-session follow-up.
+Use the provided session breakdown as context.
+Be concise, specific, and practical.
+Do not mention missing context unless necessary.
+Keep the answer under 120 words.
+
+Session breakdown:
+{session_breakdown}
+
+User question:
+{question}
+""".strip()
 
 
 @app.get("/")
@@ -95,6 +122,28 @@ async def health() -> dict:
             {"name": argument_agent.name, "address": argument_agent.address},
         ],
     }
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(request: ChatRequest) -> ChatResponse:
+    question = " ".join((request.question or "").split()).strip()
+    if not question:
+        return ChatResponse(answer="Ask a specific question about your session.")
+
+    prompt = CHAT_PROMPT.format(
+        session_breakdown=json.dumps(request.session_context.get("breakdown", {}), ensure_ascii=True),
+        question=question,
+    )
+    raw = await call_groq(
+        prompt=prompt,
+        timeout_seconds=10.0,
+        temperature=0.2,
+        max_output_tokens=300,
+    )
+    answer = " ".join((raw or "").split()).strip()
+    if not answer:
+        answer = "I couldn't generate a follow-up answer right now. Try again in a moment."
+    return ChatResponse(answer=answer)
 
 
 @app.websocket("/ws/{session_id}")
