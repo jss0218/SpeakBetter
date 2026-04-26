@@ -1355,17 +1355,8 @@
 
         try {
           state.mediaStream = await navigator.mediaDevices.getUserMedia({
-            audio: {
-              echoCancellation: true,
-              noiseSuppression: true,
-              autoGainControl: true,
-            },
-            video: {
-              facingMode: 'user',
-              width: { ideal: 640 },
-              height: { ideal: 480 },
-              frameRate: { ideal: 15, max: 24 },
-            },
+            audio: true,
+            video: { facingMode: 'user' },
           });
 
           videoEl.srcObject = state.mediaStream;
@@ -1374,9 +1365,6 @@
           setAudioState('Mic live', 'ok');
 
           state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
-          if (state.audioContext.state === 'suspended') {
-            await state.audioContext.resume();
-          }
           state.sourceNode = state.audioContext.createMediaStreamSource(state.mediaStream);
           state.processorNode = state.audioContext.createScriptProcessor(4096, 1, 1);
 
@@ -1400,11 +1388,18 @@
 
           startVisionLoop(frameStats);
         } catch (error) {
-          append('warning', error.message || String(error));
-          startDemoMode();
-          state.sessionActive = true;
-          startBtn.disabled = true;
-          stopBtn.disabled = false;
+          const detail = error && error.name ? `${error.name}: ${error.message || ''}`.trim() : (error.message || String(error));
+          append('media_error', detail);
+          setStatus(`Camera/mic blocked: ${detail}`, 'bad');
+          setCameraState('Camera blocked', 'bad');
+          setAudioState('Mic blocked', 'bad');
+          setSocketState('Connected', 'ok');
+          if (state.socket && state.socket.readyState === WebSocket.OPEN) {
+            state.socket.close(1000, 'media unavailable');
+          }
+          state.sessionActive = false;
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
         }
       };
 
