@@ -623,7 +623,7 @@
           <div class="video-overlay">
             <div class="badge-row">
               <div class="badge"><strong>Session</strong> <span id="sessionLabel">speech-demo</span></div>
-              <div class="badge"><strong>Scenario</strong> <span id="scenarioLabel">Investor pitch</span></div>
+              <div class="badge"><strong>Scenario</strong> <span id="scenarioLabel">Pitch</span></div>
             </div>
             <div class="badge-row" style="align-items:flex-end;">
               <div class="badge">Eye contact <strong id="eyeContactBadge">--</strong></div>
@@ -662,10 +662,9 @@
           <div>
             <label for="scenario">Scenario</label>
             <select id="scenario">
-              <option value="investor_pitch" selected>Investor pitch</option>
-              <option value="job_interview">Job interview</option>
-              <option value="classroom">Classroom</option>
-              <option value="conference">Conference</option>
+              <option value="pitch" selected>Pitch</option>
+              <option value="interview">Interview</option>
+              <option value="presentation">Presentation</option>
             </select>
           </div>
           <div>
@@ -800,6 +799,7 @@
       demoAngle: 0,
       transcriptParts: [],
       latestQuestionAudio: '',
+      stopRequested: false,
     };
 
     function renderFinalTranscript() {
@@ -1121,6 +1121,7 @@
         setSocketState('Connected', 'ok');
         setStatus('Requesting camera and microphone...', 'ok');
         setSttState('STT listening...', 'warn');
+        state.stopRequested = false;
         state.transcriptParts = [];
         state.latestQuestionAudio = '';
         renderFinalTranscript();
@@ -1213,6 +1214,7 @@
           }
           if (data.type === 'session_breakdown') {
             setStatus('Session complete.', 'ok');
+            setSocketState('Closing...', 'warn');
             renderFinalTranscript();
           }
           if (data.type === 'qa_question') {
@@ -1243,7 +1245,9 @@
       };
 
       state.socket.onclose = () => {
+        const stopRequested = state.stopRequested;
         state.sessionActive = false;
+        state.stopRequested = false;
         startBtn.disabled = false;
         stopBtn.disabled = true;
         micLevel.textContent = '0%';
@@ -1255,7 +1259,9 @@
         }
         append('socket', 'Closed');
         if (statusText.textContent !== 'Session complete.') {
-          setStatus('Disconnected', 'warn');
+          setStatus(stopRequested ? 'Session closed before backend finished.' : 'Disconnected', 'warn');
+          setSocketState('Disconnected', 'warn');
+        } else {
           setSocketState('Disconnected', 'warn');
         }
       };
@@ -1264,6 +1270,7 @@
     async function stopSession() {
       if (!state.sessionActive) return;
       setStatus('Stopping session...', 'warn');
+      state.stopRequested = true;
 
       try {
         if (state.socket && state.socket.readyState === WebSocket.OPEN) {
@@ -1286,16 +1293,9 @@
       if (state.sourceNode) state.sourceNode.disconnect();
       if (state.audioContext) await state.audioContext.close();
       if (state.mediaStream) state.mediaStream.getTracks().forEach((track) => track.stop());
-      if (state.socket && state.socket.readyState === WebSocket.OPEN) {
-        state.socket.close(1000, 'done');
-      }
-
-      state.sessionActive = false;
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
       setCameraState('Camera off', 'warn');
       setAudioState('Mic off', 'warn');
-      setSocketState('Disconnected', 'warn');
+      setSocketState('Waiting for backend', 'warn');
     }
 
     startBtn.addEventListener('click', () => {

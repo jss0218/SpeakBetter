@@ -7,7 +7,7 @@ import threading
 from typing import Optional
 from uuid import uuid4
 
-SCENARIOS = {"investor_pitch", "job_interview", "classroom", "conference"}
+SCENARIOS = {"pitch", "interview", "presentation"}
 
 
 def _utc_now() -> datetime:

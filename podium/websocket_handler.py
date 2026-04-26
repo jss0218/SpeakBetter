@@ -355,10 +355,33 @@ async def handle_session_end(
         task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
 
+    if session.word_count >= 80 and not session.adversarial_question.strip():
+        try:
+            result = await extract_claims_and_question(session.full_transcript, session.scenario)
+            if result:
+                session.claims = result.get("claims", [])
+                session.weakest_claim = result.get("weakest_claim", "")
+                session.gap_explanation = result.get("gap_explanation", "")
+                session.adversarial_question = result.get("adversarial_question", "")
+                logger.info(
+                    "Final argument generation completed: claims=%s question=%s",
+                    len(session.claims),
+                    bool(session.adversarial_question.strip()),
+                )
+            else:
+                logger.warning("Final argument generation returned no result")
+        except Exception as exc:
+            logger.exception("Final argument generation failed: %s", exc)
+
     question = session.adversarial_question.strip()
     if question:
         elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
         audio_base64 = await synthesize_question_audio(question, elevenlabs_key)
+        logger.info(
+            "Sending QA question to client: has_audio=%s question_length=%s",
+            bool(audio_base64),
+            len(question),
+        )
         qa_msg = QAQuestionMessage(type="qa_question", question=question, audio_base64=audio_base64)
         await _safe_send_json(websocket, qa_msg.model_dump())
 
@@ -376,6 +399,11 @@ async def handle_session_end(
                 await _safe_send_json(websocket, followup_msg.model_dump())
         except asyncio.TimeoutError:
             logger.info("QA answer timeout for session %s", session.session_id)
+    else:
+        logger.warning(
+            "Skipping QA question send because adversarial_question is empty. word_count=%s",
+            session.word_count,
+        )
 
     session.ended_at = session.ended_at or datetime.now(timezone.utc)
     snapshot = session.to_mongo()

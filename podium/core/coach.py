@@ -67,28 +67,45 @@ Include 2-3 high moments and 2-3 low moments minimum.
 ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
 
-async def call_gemini(prompt: str, timeout_seconds: float = 10.0) -> str | None:
-    api_key = os.getenv("GEMINI_API_KEY", "")
+async def call_groq(
+    prompt: str,
+    timeout_seconds: float = 10.0,
+    *,
+    temperature: float = 0.7,
+    max_output_tokens: int = 1024,
+) -> str | None:
+    api_key = os.getenv("GROQ_API_KEY", "")
+    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
     if not api_key:
-        logger.warning("GEMINI_API_KEY not set")
+        logger.warning("GROQ_API_KEY not set")
         return None
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": max_output_tokens,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
     }
 
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            response = await client.post(url, json=payload)
+            response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
-            logger.warning("Gemini non-200: %s %s", response.status_code, response.text)
+            logger.warning("Groq non-200: %s %s", response.status_code, response.text)
             return None
         data = response.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        choices = data.get("choices", [])
+        if not choices:
+            return None
+        message = choices[0].get("message", {})
+        return str(message.get("content", "")).strip() or None
     except Exception as exc:
-        logger.warning("Gemini call failed: %s", exc)
+        logger.warning("Groq call failed: %s", exc)
         return None
 
 
@@ -130,7 +147,7 @@ async def generate_realtime_tip(
         recent_fillers=", ".join(filler_words) if filler_words else "none",
     )
 
-    raw = await call_gemini(prompt=prompt, timeout_seconds=3)
+    raw = await call_groq(prompt=prompt, timeout_seconds=3, max_output_tokens=128)
     tip = (raw or "").strip()
     if not tip:
         return None
@@ -151,7 +168,7 @@ async def generate_session_breakdown(session_snapshot: dict) -> dict:
     )
 
     prompt = BREAKDOWN_PROMPT.format(
-        scenario=session_snapshot.get("scenario", "investor_pitch"),
+        scenario=session_snapshot.get("scenario", "pitch"),
         duration=round(float(session_snapshot.get("elapsed_seconds", 0.0)), 2),
         transcript=session_snapshot.get("full_transcript", ""),
         engagement_history=json.dumps(engagement_history, ensure_ascii=True),
@@ -165,7 +182,12 @@ async def generate_session_breakdown(session_snapshot: dict) -> dict:
         ),
     )
 
-    raw = await call_gemini(prompt=prompt, timeout_seconds=20)
+    raw = await call_groq(
+        prompt=prompt,
+        timeout_seconds=20,
+        temperature=0.3,
+        max_output_tokens=1400,
+    )
     parsed = _safe_json_parse(raw)
     if not parsed:
         return fallback_breakdown(session_snapshot)

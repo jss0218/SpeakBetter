@@ -15,7 +15,6 @@ No explanation, no markdown, no code blocks. Raw JSON only.
 
 Speech scenario: {scenario}
 Transcript: {transcript}
-Number of adversarial questions to generate: {question_count}
 
 Return exactly this structure:
 {{
@@ -23,20 +22,35 @@ Return exactly this structure:
   "weakest_claim": "the specific claim with least evidence",
   "gap_explanation": "one sentence on why this claim is weak",
   "adversarial_questions": [
-    "challenging question 1 targeting the weakest claim, under 35 words, referencing specific content from the transcript"
+    "challenging question targeting the weakest claim, under 35 words, referencing specific content from the transcript"
   ]
 }}
 
 Rules:
 - Only include claims the speaker actually made
 - Each question must be specific to what was said, not generic
-- Make the questions distinct from each other and escalate pressure slightly
 - Return exactly {question_count} questions when the transcript is long enough
 - If transcript has fewer than 80 words, return {{"claims": [], "weakest_claim": "", "gap_explanation": "", "adversarial_questions": []}}
-- For investor_pitch scenario: focus on business model and market assumptions
-- For job_interview scenario: focus on skill claims and experience assertions
-- For classroom scenario: focus on conceptual understanding gaps
-- For conference scenario: focus on methodology and evidence quality
+
+Scenario-specific behavior:
+
+If scenario is "pitch":
+  - You are a skeptical investor who has heard a thousand pitches
+  - Focus on: unsubstantiated numbers, market size claims, competitive moat, revenue assumptions
+  - Question tone: blunt, commercial, "show me the money"
+  - Example: "You said 40% cost reduction — what customer data backs that up?"
+
+If scenario is "interview":
+  - You are a hiring manager probing for specificity
+  - Focus on: vague skill claims, unverified experience, generic answers without examples
+  - Question tone: direct, pointed, "prove it"
+  - Example: "You said you led the project — what specifically did you decide and what was the outcome?"
+
+If scenario is "presentation":
+  - You are an informed peer reviewing the logic
+  - Focus on: methodology gaps, unsupported assertions, logical leaps, missing evidence
+  - Question tone: intellectual, rigorous, "walk me through that"
+  - Example: "You claimed X causes Y — did you account for confounding variables?"
 """.strip()
 
 FOLLOWUP_PROMPT = """
@@ -60,6 +74,7 @@ ELEVENLABS_VOICE_ID = "21m00Tcm4TlvDq8ikWAM"
 
 def _parse_json_payload(raw: str | None) -> dict | None:
     if not raw:
+        logger.warning("Groq returned empty payload")
         return None
     text = raw.strip()
     if text.startswith("```"):
@@ -69,52 +84,85 @@ def _parse_json_payload(raw: str | None) -> dict | None:
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        logger.warning("Failed to parse Gemini JSON payload")
+        logger.warning("Failed to parse Groq JSON payload: %s", text[:800])
         return None
 
 
-async def call_gemini(
+async def call_groq(
     prompt: str,
     timeout_seconds: float = 8.0,
     *,
     temperature: float = 0.3,
     max_output_tokens: int = 1024,
 ) -> str | None:
-    api_key = os.getenv("GEMINI_API_KEY", "")
+    api_key = os.getenv("GROQ_API_KEY", "")
+    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip() or "llama-3.3-70b-versatile"
     if not api_key:
-        logger.warning("GEMINI_API_KEY not set")
+        logger.warning("GROQ_API_KEY not set")
         return None
 
-    url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-1.5-flash:generateContent?key={api_key}"
-    )
+    url = "https://api.groq.com/openai/v1/chat/completions"
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": temperature,
-            "maxOutputTokens": max_output_tokens,
-            "responseMimeType": "application/json",
-        },
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": max_output_tokens,
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
     }
 
     try:
         async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-            response = await client.post(url, json=payload)
+            response = await client.post(url, headers=headers, json=payload)
         if response.status_code != 200:
-            logger.warning("Gemini non-200 status: %s %s", response.status_code, response.text)
+            logger.warning("Groq non-200 status: %s %s", response.status_code, response.text)
             return None
         body = response.json()
-        candidates = body.get("candidates", [])
-        if not candidates:
+        choices = body.get("choices", [])
+        if not choices:
             return None
-        parts = candidates[0].get("content", {}).get("parts", [])
-        if not parts:
-            return None
-        return str(parts[0].get("text", "")).strip() or None
+        message = choices[0].get("message", {})
+        return str(message.get("content", "")).strip() or None
     except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError, ValueError) as exc:
-        logger.warning("Gemini call failed: %s", exc)
+        logger.warning("Groq call failed: %r", exc)
         return None
+
+
+async def _repair_argument_payload(
+    raw: str,
+    question_count: int,
+    timeout_seconds: float = 8.0,
+) -> dict | None:
+    repair_prompt = f"""
+Convert the following malformed model output into valid JSON only.
+Do not add markdown fences or commentary.
+Return exactly this schema:
+{{
+  "claims": ["main claim 1", "main claim 2", "main claim 3"],
+  "weakest_claim": "the specific claim with least evidence",
+  "gap_explanation": "one sentence on why this claim is weak",
+  "adversarial_questions": ["question 1", "question 2", "question 3"]
+}}
+Return at most {question_count} adversarial questions.
+
+Malformed output:
+{raw}
+""".strip()
+
+    repaired_raw = await call_groq(
+        prompt=repair_prompt,
+        timeout_seconds=timeout_seconds,
+        temperature=0.1,
+        max_output_tokens=1800,
+    )
+    parsed = _parse_json_payload(repaired_raw)
+    if parsed:
+        logger.info("Argument payload repair succeeded")
+    else:
+        logger.warning("Argument payload repair failed")
+    return parsed
 
 
 def _normalize_question_count(question_count: int) -> int:
@@ -145,19 +193,39 @@ async def extract_claims_and_questions(
         transcript=transcript,
         question_count=normalized_count,
     )
-    raw = await call_gemini(prompt=prompt, timeout_seconds=10.0, max_output_tokens=1400)
+    raw = await call_groq(
+        prompt=prompt,
+        timeout_seconds=20.0,
+        temperature=0.1,
+        max_output_tokens=2200,
+    )
     parsed = _parse_json_payload(raw)
     if not parsed:
-        return None
+        if raw:
+            parsed = await _repair_argument_payload(raw, normalized_count, timeout_seconds=12.0)
+        if not parsed:
+            logger.warning("Argument extraction returned no parsed payload")
+            return None
 
-    required = {"claims", "weakest_claim", "gap_explanation", "adversarial_questions"}
+    required = {"claims", "weakest_claim", "gap_explanation"}
     if not required.issubset(parsed.keys()):
+        logger.warning("Argument extraction missing required keys: %s", sorted(parsed.keys()))
         return None
 
     claims = parsed.get("claims")
     if not isinstance(claims, list):
+        logger.warning("Argument extraction returned non-list claims: %r", type(claims).__name__)
         return None
     questions = _sanitize_questions(parsed.get("adversarial_questions"), normalized_count)
+    if not questions:
+        single_question = " ".join(str(parsed.get("adversarial_question", "")).split()).strip()
+        if single_question:
+            questions = [single_question]
+    logger.info(
+        "Argument extraction parsed %s claims and %s questions",
+        len(claims),
+        len(questions),
+    )
 
     return {
         "claims": [str(c).strip() for c in claims if str(c).strip()],
@@ -182,14 +250,17 @@ async def generate_followup_question(
         user_answer=user_answer,
         claims=json.dumps(claims, ensure_ascii=True),
     )
-    raw = await call_gemini(prompt=prompt, timeout_seconds=6.0, max_output_tokens=300)
+    raw = await call_groq(prompt=prompt, timeout_seconds=6.0, max_output_tokens=300)
     parsed = _parse_json_payload(raw)
     if not parsed:
+        logger.warning("Follow-up generation returned no parsed payload")
         return None
 
     if bool(parsed.get("should_followup")):
         question = str(parsed.get("followup_question", "")).strip()
+        logger.info("Follow-up generation produced question: %s", bool(question))
         return question or None
+    logger.info("Follow-up generation decided no follow-up was needed")
     return None
 
 

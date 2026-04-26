@@ -14,18 +14,17 @@ questions targeting the weakest point in your argument.
 - Generate a personalized breakdown with your stress signature
 
 ## When to use me
-- Practicing an investor pitch
-- Preparing for a job interview
-- Rehearsing a conference presentation
+- Practicing a pitch
+- Preparing for an interview
+- Rehearsing a presentation
 - Improving general public speaking confidence
 - Testing arguments before a debate or presentation
 
 ## How to start
 Just tell me what you want to practice:
-"I want to practice a 5 minute investor pitch"
-"Help me prepare for a technical job interview"
-"I need to practice my conference talk for 10 minutes"
-"Help me practice presenting to a classroom"
+"I want to practice a 5 minute pitch"
+"Help me prepare for an interview"
+"I need to practice my presentation for 10 minutes"
 
 ## Tags
 public-speaking, coaching, presentation, pitch, interview-prep,
@@ -87,15 +86,13 @@ class BreakdownResponse(Model):
 def _parse_scenario_and_duration(content: str) -> tuple[str, int]:
     text = (content or "").lower()
 
-    scenario = "investor_pitch"
+    scenario = "pitch"
     if "interview" in text:
-        scenario = "job_interview"
-    elif "classroom" in text or "class" in text:
-        scenario = "classroom"
-    elif "conference" in text or "talk" in text:
-        scenario = "conference"
+        scenario = "interview"
+    elif "presentation" in text or "presenting" in text or "talk" in text:
+        scenario = "presentation"
     elif "pitch" in text:
-        scenario = "investor_pitch"
+        scenario = "pitch"
 
     duration_seconds = 300
     match = re.search(r"(\d+)\s*(minute|minutes|min)", text)

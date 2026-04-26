@@ -24,7 +24,7 @@ from podium.websocket_handler import handle_session
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 app = FastAPI(title="Podium Backend", version="1.0.0")
 BASE_DIR = Path(__file__).resolve().parent
@@ -38,7 +38,7 @@ app.add_middleware(
 )
 
 ACTIVE_WEBSOCKETS: set[WebSocket] = set()
-SCENARIO = Literal["investor_pitch", "job_interview", "classroom", "conference"]
+SCENARIO = Literal["pitch", "interview", "presentation"]
 
 
 @app.get("/")
@@ -105,7 +105,7 @@ async def websocket_endpoint(
     websocket: WebSocket,
     session_id: str,
     user_id: str = Query(...),
-    scenario: SCENARIO = Query("investor_pitch"),
+    scenario: SCENARIO = Query("pitch"),
     target_duration: int = Query(300, ge=30, le=3600),
 ) -> None:
     await websocket.accept()
