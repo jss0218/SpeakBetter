@@ -52,7 +52,7 @@ const PEOPLE: PersonDef[] = [
   },
 ];
 
-type SessionPhase = 'connecting' | 'speaking' | 'qa' | 'finishing' | 'ended';
+type SessionPhase = 'connecting' | 'speaking' | 'qa' | 'answering' | 'finishing' | 'ended';
 type AvatarState = 'engaged' | 'neutral' | 'bored' | 'confused' | 'distracted';
 
 interface AudienceMember extends PersonDef {
@@ -178,6 +178,17 @@ const playBase64Audio = async (audioBase64: string) => {
   }
 };
 
+const playQuestionAudio = async (audioBase64: string, onEnded: () => void) => {
+  const audio = new Audio(`data:audio/mpeg;base64,${audioBase64}`);
+  audio.onended = onEnded;
+  try {
+    await audio.play();
+  } catch {
+    onEnded();
+  }
+  return audio;
+};
+
 export function LiveSession({
   audienceSize = 9,
   duration = 5,
@@ -193,7 +204,6 @@ export function LiveSession({
   const [engagementScore, setEngagementScore] = useState(0.5);
   const [dominantSignal, setDominantSignal] = useState('--');
   const [questionText, setQuestionText] = useState('Speak for a bit, then stop the session to receive a voiced adversarial question.');
-  const [qaInput, setQaInput] = useState('');
   const [questionPending, setQuestionPending] = useState(false);
   const [showEndButton, setShowEndButton] = useState(false);
   const [audience, setAudience] = useState<AudienceMember[]>(() => createInitialAudience(audienceSize));
@@ -207,6 +217,8 @@ export function LiveSession({
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorNodeRef = useRef<ScriptProcessorNode | null>(null);
+  const shouldStreamAudioRef = useRef(true);
+  const questionAudioRef = useRef<HTMLAudioElement | null>(null);
   const visionTimerRef = useRef<number | null>(null);
   const timerRef = useRef<number | null>(null);
   const lastFrameRef = useRef<Uint8ClampedArray | null>(null);
@@ -215,6 +227,7 @@ export function LiveSession({
   const calibrationSamplesRef = useRef<Record<string, unknown>[]>([]);
   const calibrationDeadlineRef = useRef(0);
   const calibrationSentRef = useRef(false);
+  const questionTimeoutRef = useRef<number | null>(null);
   const sessionIdRef = useRef(
     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? `session-${crypto.randomUUID().slice(0, 8)}`
@@ -246,9 +259,13 @@ export function LiveSession({
   useEffect(() => {
     void startSession();
     return () => {
-      if (recordingUrlRef.current) {
-        URL.revokeObjectURL(recordingUrlRef.current);
-        recordingUrlRef.current = null;
+      if (questionAudioRef.current) {
+        questionAudioRef.current.pause();
+        questionAudioRef.current = null;
+      }
+      if (questionTimeoutRef.current) {
+        window.clearTimeout(questionTimeoutRef.current);
+        questionTimeoutRef.current = null;
       }
       void cleanupLocalMedia();
       closeSocket();
@@ -529,6 +546,7 @@ export function LiveSession({
       const input = event.inputBuffer.getChannelData(0);
       const resampled = resampleBuffer(input, audioContext.sampleRate, 16000);
       setMicLevel(Math.round(chunkLevel(resampled) * 100));
+      if (!shouldStreamAudioRef.current) return;
       socket.send(floatTo16BitPCM(resampled));
     };
 
@@ -613,6 +631,10 @@ export function LiveSession({
         }
       }
       if (data.type === 'qa_question') {
+        if (questionTimeoutRef.current) {
+          window.clearTimeout(questionTimeoutRef.current);
+          questionTimeoutRef.current = null;
+        }
         const question = String(data.question || '').trim();
         if (question) {
           setQuestionText(question);
@@ -622,7 +644,22 @@ export function LiveSession({
         }
         const audioBase64 = String(data.audio_base64 || '');
         if (audioBase64) {
-          void playBase64Audio(audioBase64);
+          shouldStreamAudioRef.current = false;
+          void (async () => {
+            if (questionAudioRef.current) {
+              questionAudioRef.current.pause();
+              questionAudioRef.current = null;
+            }
+            questionAudioRef.current = await playQuestionAudio(audioBase64, () => {
+              shouldStreamAudioRef.current = true;
+              setPhase('answering');
+              setStatusText('Answer the question out loud, then tap Done answering.');
+            });
+          })();
+        } else {
+          shouldStreamAudioRef.current = true;
+          setPhase('answering');
+          setStatusText('Answer the question out loud, then tap Done answering.');
         }
       }
       if (data.type === 'session_breakdown') {
@@ -671,32 +708,35 @@ export function LiveSession({
     const socket = wsRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
-    pushDebug('Sending session_end');
+    pushDebug('Sending pause_session');
     stopRequestedRef.current = true;
-    setPhase('finishing');
-    setStatusText('Stopping session…');
-    socket.send(JSON.stringify({ type: 'session_end', user_id: 'frontend_user' }));
-    await cleanupLocalMedia();
-    setConnectionState('Waiting for backend');
+    setPhase('qa');
+    setQuestionPending(false);
+    setQuestionText('Analyzing your speech and preparing your first question...');
+    setStatusText('Pausing mic while AI prepares a question…');
+    shouldStreamAudioRef.current = false;
+    setMicLevel(0);
+    socket.send(JSON.stringify({ type: 'pause_session', user_id: 'frontend_user' }));
+    setConnectionState('Preparing question');
+    if (questionTimeoutRef.current) {
+      window.clearTimeout(questionTimeoutRef.current);
+    }
+    questionTimeoutRef.current = window.setTimeout(() => {
+      setStatusText('Still waiting for the backend question. Check the server logs.');
+      pushDebug('Timed out waiting for qa_question');
+    }, 15000);
   };
 
-  const submitQaAnswer = () => {
+  const finishSpokenAnswer = () => {
     const socket = wsRef.current;
-    const answer = qaInput.trim();
-    if (!socket || socket.readyState !== WebSocket.OPEN || !answer) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
-    socket.send(
-      JSON.stringify({
-        type: 'qa_answer',
-        answer,
-        timestamp: Date.now() / 1000,
-      })
-    );
-    pushDebug('Sent qa_answer');
-    setQaInput('');
+    shouldStreamAudioRef.current = false;
+    socket.send(JSON.stringify({ type: 'qa_answer_done', timestamp: Date.now() / 1000 }));
+    pushDebug('Sent qa_answer_done');
     setQuestionPending(false);
     setPhase('finishing');
-    setStatusText('Answer sent. Waiting for final breakdown…');
+    setStatusText('Answer captured. Waiting for final breakdown…');
   };
 
   return (
@@ -790,29 +830,26 @@ export function LiveSession({
         </div>
       </div>
 
-      {(phase === 'qa' || phase === 'finishing') && (
+      {(phase === 'qa' || phase === 'answering' || phase === 'finishing') && (
         <div className="absolute inset-x-0 bottom-8 z-30 flex justify-center px-6">
           <div className="w-full max-w-3xl rounded-[28px] p-5" style={{ backgroundColor: 'rgba(9, 12, 20, 0.92)', border: '1px solid rgba(232,184,75,0.22)', backdropFilter: 'blur(20px)' }}>
             <div className="text-xs uppercase tracking-[0.28em]" style={{ color: '#E8B84B' }}>Argument question</div>
             <div className="mt-3 text-lg leading-relaxed" style={{ color: '#FFFFFF', fontWeight: 500 }}>
               {questionText}
             </div>
-            {questionPending && (
-              <div className="mt-4 flex gap-3">
-                <input
-                  value={qaInput}
-                  onChange={(event) => setQaInput(event.target.value)}
-                  placeholder="Answer the question..."
-                  className="flex-1 rounded-full px-5 py-3 bg-transparent outline-none"
-                  style={{ border: '1px solid rgba(255,255,255,0.14)', color: '#FFFFFF' }}
-                />
+            <div className="mt-4 text-sm opacity-75" style={{ color: '#FFFFFF' }}>
+              {phase === 'qa' && 'Listening is paused while the AI generates and plays the question.'}
+              {phase === 'answering' && 'Speak your answer naturally. The backend is transcribing and scoring this response too.'}
+              {phase === 'finishing' && 'Wrapping up your answer and preparing results…'}
+            </div>
+            {phase === 'answering' && questionPending && (
+              <div className="mt-4 flex justify-end">
                 <button
-                  onClick={submitQaAnswer}
-                  disabled={!qaInput.trim()}
-                  className="rounded-full px-5 py-3 disabled:opacity-40"
+                  onClick={finishSpokenAnswer}
+                  className="rounded-full px-5 py-3"
                   style={{ backgroundColor: '#E8B84B', color: '#111111', fontWeight: 600 }}
                 >
-                  Send
+                  Done answering
                 </button>
               </div>
             )}

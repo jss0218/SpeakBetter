@@ -68,6 +68,9 @@ class SessionState:
     gap_explanation: str = ""
     adversarial_question: str = ""
     user_qa_answer: str = ""
+    session_phase: str = "speaking"
+    qa_answer_transcript: str = ""
+    qa_question_count: int = 0
 
     coach_tips: list[dict] = field(default_factory=list)
     last_tip_timestamp: float = 0.0
@@ -161,6 +164,8 @@ class SessionState:
             self.energy_history.append(self.vocal_energy)
             if len(self.energy_history) > 30:
                 self.energy_history = self.energy_history[-30:]
+            if self.session_phase == "qa_answering":
+                self.qa_answer_transcript = (self.qa_answer_transcript + " " + clean_text).strip()
 
     def update_vision(
         self,
@@ -276,6 +281,7 @@ class SessionState:
                 "vision_confidence": self.vision_confidence,
                 "delivery_events": list(self.delivery_events),
                 "calibrated_vision_scores": dict(self.calibrated_vision_scores),
+                "session_phase": self.session_phase,
             }
 
     def get_elapsed_seconds(self) -> float:
@@ -337,6 +343,9 @@ class SessionState:
                 "gap_explanation": self.gap_explanation,
                 "adversarial_question": self.adversarial_question,
                 "user_qa_answer": self.user_qa_answer,
+                "session_phase": self.session_phase,
+                "qa_answer_transcript": self.qa_answer_transcript,
+                "qa_question_count": self.qa_question_count,
                 "coach_tips": list(self.coach_tips),
                 "last_tip_timestamp": self.last_tip_timestamp,
                 "last_vision_tip_signal": self.last_vision_tip_signal,

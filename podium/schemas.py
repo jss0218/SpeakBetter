@@ -35,6 +35,16 @@ class SessionEndMessage(BaseModel):
     user_id: str
 
 
+class PauseSessionMessage(BaseModel):
+    type: Literal["pause_session"]
+    user_id: str
+
+
+class QAAnswerDoneMessage(BaseModel):
+    type: Literal["qa_answer_done"]
+    timestamp: float
+
+
 class QAAnswerMessage(BaseModel):
     type: Literal["qa_answer"]
     answer: str

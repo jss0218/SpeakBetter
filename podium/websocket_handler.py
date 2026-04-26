@@ -86,6 +86,12 @@ async def _handle_transcript_text(session: SessionState, websocket: WebSocket, t
     await _safe_send_json(websocket, payload.model_dump())
 
 
+def _cancel_live_tasks(tasks: list[asyncio.Task]) -> "asyncio.Future":
+    for task in tasks:
+        task.cancel()
+    return asyncio.gather(*tasks, return_exceptions=True)
+
+
 def _extract_incremental_delta(prev: str, current: str) -> str:
     """
     Given a growing transcript, extract the "new" portion robustly.
@@ -291,6 +297,9 @@ async def fusion_loop(session: SessionState, websocket: WebSocket, stop_event: a
 async def coach_loop(session: SessionState, websocket: WebSocket, stop_event: asyncio.Event) -> None:
     while not stop_event.is_set() and session.ended_at is None:
         try:
+            if session.session_phase != "speaking":
+                await asyncio.sleep(2)
+                continue
             now = session.get_elapsed_seconds()
             tip = await generate_realtime_tip(
                 recent_transcript=session.get_recent_transcript(30),
@@ -317,6 +326,9 @@ async def coach_loop(session: SessionState, websocket: WebSocket, stop_event: as
 async def vision_coach_loop(session: SessionState, websocket: WebSocket, stop_event: asyncio.Event) -> None:
     while not stop_event.is_set() and session.ended_at is None:
         try:
+            if session.session_phase != "speaking":
+                await asyncio.sleep(2)
+                continue
             now = session.get_elapsed_seconds()
             if now - float(session.last_tip_timestamp) >= 12:
                 tip, signal = generate_vision_tip(
@@ -341,6 +353,9 @@ async def argument_loop(session: SessionState, websocket: WebSocket, stop_event:
     del websocket
     while not stop_event.is_set() and session.ended_at is None:
         try:
+            if session.session_phase != "speaking":
+                await asyncio.sleep(2)
+                continue
             if session.word_count >= 100:
                 result = await extract_claims_and_question(session.full_transcript, session.scenario)
                 if result:
@@ -354,62 +369,12 @@ async def argument_loop(session: SessionState, websocket: WebSocket, stop_event:
         await asyncio.sleep(45)
 
 
-async def handle_session_end(
+async def _finalize_session(
     session: SessionState,
     websocket: WebSocket,
-    tasks: list[asyncio.Task],
-    qa_queue: "asyncio.Queue[str]",
     stop_event: asyncio.Event,
 ) -> None:
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-
-    if session.word_count >= 80 and not session.adversarial_question.strip():
-        try:
-            result = await extract_claims_and_question(session.full_transcript, session.scenario)
-            if result:
-                session.claims = result.get("claims", [])
-                session.weakest_claim = result.get("weakest_claim", "")
-                session.gap_explanation = result.get("gap_explanation", "")
-                session.adversarial_question = result.get("adversarial_question", "")
-                logger.info(
-                    "Final argument generation completed: claims=%s question=%s",
-                    len(session.claims),
-                    bool(session.adversarial_question.strip()),
-                )
-            else:
-                logger.warning("Final argument generation returned no result")
-        except Exception as exc:
-            logger.exception("Final argument generation failed: %s", exc)
-
-    question = session.adversarial_question.strip()
-    if question:
-        elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
-        audio_base64 = await synthesize_question_audio(question, elevenlabs_key)
-        qa_msg = QAQuestionMessage(type="qa_question", question=question, audio_base64=audio_base64)
-        await _safe_send_json(websocket, qa_msg.model_dump())
-
-        try:
-            answer = await asyncio.wait_for(qa_queue.get(), timeout=60)
-            session.user_qa_answer = answer
-            followup = await generate_followup_question(question, answer, session.claims)
-            if followup:
-                followup_audio = await synthesize_question_audio(followup, elevenlabs_key)
-                followup_msg = QAQuestionMessage(
-                    type="qa_question",
-                    question=followup,
-                    audio_base64=followup_audio,
-                )
-                await _safe_send_json(websocket, followup_msg.model_dump())
-        except asyncio.TimeoutError:
-            logger.info("QA answer timeout for session %s", session.session_id)
-    else:
-        logger.warning(
-            "Skipping QA question send because adversarial_question is empty. word_count=%s",
-            session.word_count,
-        )
-
+    session.session_phase = "finalizing"
     session.ended_at = session.ended_at or datetime.now(timezone.utc)
     snapshot = session.to_mongo()
     snapshot["elapsed_seconds"] = session.get_elapsed_seconds()
@@ -432,12 +397,64 @@ async def handle_session_end(
         pass
 
 
+async def handle_pause_session(session: SessionState, websocket: WebSocket) -> None:
+    session.session_phase = "asking_question"
+
+    if session.word_count >= 80 and not session.adversarial_question.strip():
+        try:
+            result = await extract_claims_and_question(session.full_transcript, session.scenario)
+            if result:
+                session.claims = result.get("claims", [])
+                session.weakest_claim = result.get("weakest_claim", "")
+                session.gap_explanation = result.get("gap_explanation", "")
+                session.adversarial_question = result.get("adversarial_question", "")
+                logger.info(
+                    "Pause-session argument generation completed: claims=%s question=%s",
+                    len(session.claims),
+                    bool(session.adversarial_question.strip()),
+                )
+            else:
+                logger.warning("Pause-session argument generation returned no result")
+        except Exception as exc:
+            logger.exception("Pause-session argument generation failed: %s", exc)
+
+    question = session.adversarial_question.strip()
+    if not question:
+        logger.warning(
+            "Skipping QA question send because adversarial_question is empty. word_count=%s",
+            session.word_count,
+        )
+        return
+
+    elevenlabs_key = os.getenv("ELEVENLABS_API_KEY", "")
+    audio_base64 = await synthesize_question_audio(question, elevenlabs_key)
+    session.qa_answer_transcript = ""
+    session.user_qa_answer = ""
+    session.qa_question_count += 1
+    qa_msg = QAQuestionMessage(type="qa_question", question=question, audio_base64=audio_base64)
+    await _safe_send_json(websocket, qa_msg.model_dump())
+
+
+async def handle_qa_answer_done(
+    session: SessionState,
+    websocket: WebSocket,
+    tasks: list[asyncio.Task],
+    stop_event: asyncio.Event,
+) -> None:
+    session.session_phase = "qa_complete"
+    spoken_answer = session.qa_answer_transcript.strip()
+    if spoken_answer:
+        session.user_qa_answer = spoken_answer
+
+    await _cancel_live_tasks(tasks)
+    await _finalize_session(session, websocket, stop_event)
+
+
 async def handle_session(websocket: WebSocket, session_id: str, session: SessionState) -> None:
     del session_id
 
     stop_event = asyncio.Event()
     audio_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
-    qa_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=2)
 
     connected = ConnectedMessage(type="connected", session_id=session.session_id, config=session.get_snapshot())
     await _safe_send_json(websocket, connected.model_dump())
@@ -479,17 +496,19 @@ async def handle_session(websocket: WebSocket, session_id: str, session: Session
                 await handle_vision_update(msg, session)
             elif msg_type == "vision_calibration":
                 await handle_vision_calibration(msg, session)
+            elif msg_type == "pause_session":
+                await handle_pause_session(session, websocket)
             elif msg_type == "session_end":
-                await handle_session_end(session, websocket, tasks, qa_queue, stop_event)
+                await _cancel_live_tasks(tasks)
+                await _finalize_session(session, websocket, stop_event)
+                break
+            elif msg_type == "qa_answer_done":
+                await handle_qa_answer_done(session, websocket, tasks, stop_event)
                 break
             elif msg_type == "qa_answer":
                 answer = str(msg.get("answer", "")).strip()
                 if answer:
                     session.user_qa_answer = answer
-                    try:
-                        qa_queue.put_nowait(answer)
-                    except asyncio.QueueFull:
-                        pass
     except WebSocketDisconnect:
         logger.info("WebSocket disconnected for session %s", session.session_id)
     except Exception as exc:
