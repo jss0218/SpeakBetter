@@ -67,6 +67,8 @@ export default function App() {
     colorEngagement: false
   });
   const [chatInput, setChatInput] = useState('');
+  const [chatMessages, setChatMessages] = useState<Array<{ role: 'user' | 'assistant'; content: string }>>([]);
+  const [chatLoading, setChatLoading] = useState(false);
   const [progress, setProgress] = useState(45);
   const [sessionResult, setSessionResult] = useState<SessionResult | null>(null);
   const resultsVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -78,6 +80,31 @@ export default function App() {
       }
     };
   }, [sessionResult]);
+
+  const sendChat = async () => {
+    const question = chatInput.trim();
+    if (!question || chatLoading) return;
+    setChatInput('');
+    setChatMessages(prev => [...prev, { role: 'user', content: question }]);
+    setChatLoading(true);
+    try {
+      const backendBase = import.meta.env.VITE_PODIUM_BACKEND_URL || 'http://localhost:8001';
+      const res = await fetch(`${backendBase}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question,
+          session_context: { breakdown: sessionResult?.breakdown || {} },
+        }),
+      });
+      const data = await res.json();
+      setChatMessages(prev => [...prev, { role: 'assistant', content: data.answer }]);
+    } catch {
+      setChatMessages(prev => [...prev, { role: 'assistant', content: 'Could not reach the coach. Please try again.' }]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
 
   if (currentScreen === 'landing') {
     return (
@@ -228,6 +255,8 @@ export default function App() {
         practiceType={sessionConfig.practiceType}
         onEndSession={(result) => {
           setSessionResult(result);
+          setChatMessages([]);
+          setChatInput('');
           setCurrentScreen('results');
         }}
       />
@@ -404,11 +433,38 @@ export default function App() {
               style={{ backgroundColor: '#FFFFFF', border: '0.5px solid rgba(26, 26, 26, 0.1)' }}
             >
               <h3 className="mb-3" style={{ fontWeight: 500 }}>Ask a follow-up</h3>
+              {chatMessages.length > 0 && (
+                <div className="mb-3 space-y-2 max-h-48 overflow-y-auto">
+                  {chatMessages.map((msg, i) => (
+                    <div
+                      key={i}
+                      className="px-3 py-2 rounded-xl text-sm"
+                      style={{
+                        backgroundColor: msg.role === 'user' ? '#F0F0EB' : '#FEF9EC',
+                        textAlign: msg.role === 'user' ? 'right' : 'left',
+                        border: msg.role === 'assistant' ? '0.5px solid rgba(232,184,75,0.3)' : 'none',
+                      }}
+                    >
+                      {msg.role === 'assistant' && (
+                        <span className="text-xs font-medium mr-1" style={{ color: '#E8B84B' }}>Coach</span>
+                      )}
+                      {msg.content}
+                    </div>
+                  ))}
+                  {chatLoading && (
+                    <div className="px-3 py-2 rounded-xl text-sm" style={{ backgroundColor: '#FEF9EC', color: '#888' }}>
+                      <span className="text-xs font-medium mr-1" style={{ color: '#E8B84B' }}>Coach</span>
+                      Thinking...
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="flex gap-2">
                 <input
                   type="text"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && sendChat()}
                   placeholder="Ask anything about your session..."
                   className="flex-1 px-4 py-3 rounded-xl"
                   style={{
@@ -418,12 +474,15 @@ export default function App() {
                   }}
                 />
                 <button
+                  onClick={sendChat}
+                  disabled={chatLoading}
                   className="px-6 py-3 rounded-xl"
                   style={{
                     backgroundColor: '#E8B84B',
                     color: '#1A1A1A',
                     fontWeight: 500,
-                    border: '0.5px solid rgba(26, 26, 26, 0.1)'
+                    border: '0.5px solid rgba(26, 26, 26, 0.1)',
+                    opacity: chatLoading ? 0.6 : 1,
                   }}
                 >
                   Send
