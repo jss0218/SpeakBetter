@@ -561,7 +561,7 @@ export function LiveSession({
   };
 
   const startSession = async () => {
-    const backendBase = import.meta.env.VITE_PODIUM_BACKEND_URL || 'http://localhost:8000';
+    const backendBase = import.meta.env.VITE_PODIUM_BACKEND_URL || 'http://localhost:8001';
     const backendUrl = new URL(backendBase);
     const protocol = backendUrl.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${protocol}//${backendUrl.host}/ws/${encodeURIComponent(sessionIdRef.current)}?user_id=${encodeURIComponent('frontend_user')}&scenario=${encodeURIComponent(practiceType)}&target_duration=${encodeURIComponent(duration * 60)}&audience_size=${encodeURIComponent(audienceSize)}`;
