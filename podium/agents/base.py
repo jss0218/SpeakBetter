@@ -24,8 +24,8 @@ def create_podium_agent(
         name=name,
         seed=seed,
         port=port,
-        endpoint=[f"http://localhost:{port}/submit"],
         mailbox=True,
+        publish_agent_details=True,
         loop=loop,
     )
 
