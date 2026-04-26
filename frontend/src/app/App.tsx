@@ -10,7 +10,7 @@ type Screen = 'landing' | 'setup' | 'calibration' | 'session' | 'results';
 interface FeedbackItem {
   timestamp: string;
   text: string;
-  category: 'filler' | 'pacing' | 'eyecontact';
+  category: 'filler' | 'pacing' | 'eyecontact' | 'engagement';
 }
 
 interface SessionBreakdown {
@@ -19,11 +19,13 @@ interface SessionBreakdown {
     timestamp_seconds?: number;
     description?: string;
     transcript_snippet?: string;
+    timeline_kind?: string;
   }>;
   low_moments?: Array<{
     timestamp_seconds?: number;
     description?: string;
     transcript_snippet?: string;
+    timeline_kind?: string;
   }>;
   strengths?: string[];
   improvements?: string[];
@@ -37,6 +39,13 @@ interface SessionResult {
   recordingUrl: string | null;
 }
 
+function mapTimelineKind(kind: string | undefined, isHigh: boolean): FeedbackItem['category'] {
+  if (kind === 'filler') return 'filler';
+  if (kind === 'eye_contact') return 'eyecontact';
+  if (kind === 'engagement') return 'engagement';
+  if (kind === 'pace') return 'pacing';
+  return isHigh ? 'eyecontact' : 'pacing';
+}
 
 function BackButton({ onClick }: { onClick: () => void }) {
   return (
@@ -267,13 +276,13 @@ export default function App() {
     const feedbackItems: FeedbackItem[] = [
       ...((breakdown.high_moments || []).map((item) => ({
         timestamp: formatTimestamp(item.timestamp_seconds),
-        text: item.description || 'Strong moment',
-        category: 'eyecontact' as const,
+        text: String(item.description || 'Strong moment').trim(),
+        category: mapTimelineKind(item.timeline_kind, true),
       }))),
       ...((breakdown.low_moments || []).map((item) => ({
         timestamp: formatTimestamp(item.timestamp_seconds),
-        text: item.description || 'Moment to improve',
-        category: 'pacing' as const,
+        text: String(item.description || 'Moment to improve').trim(),
+        category: mapTimelineKind(item.timeline_kind, false),
       }))),
     ].sort((a, b) => timestampToSeconds(a.timestamp) - timestampToSeconds(b.timestamp));
 
@@ -294,9 +303,14 @@ export default function App() {
         case 'filler': return '#F59E0B';
         case 'pacing': return '#14B8A6';
         case 'eyecontact': return '#A855F7';
+        case 'engagement': return '#0D9488';
         default: return '#E8B84B';
       }
     };
+
+    const timelineRows = feedbackItems.length
+      ? feedbackItems
+      : [{ timestamp: '0:00', text: 'No detailed moment data was returned for this run.', category: 'pacing' as const }];
 
     return (
       <div className="min-h-screen" style={{ backgroundColor: '#FAFAF7', color: '#1A1A1A' }}>
@@ -327,10 +341,8 @@ export default function App() {
             >
               <h2 className="mb-6" style={{ fontWeight: 500 }}>Feedback timeline</h2>
               <div className="space-y-4">
-                {(feedbackItems.length ? feedbackItems : [
-                  { timestamp: '0:00', text: 'No detailed moment data was returned for this run.', category: 'pacing' as const }
-                ]).map((item, i) => (
-                  <div key={i}>
+                {timelineRows.map((item, i) => (
+                  <div key={`${item.timestamp}-${i}`}>
                     <div className="flex items-start gap-3">
                       <div
                         className="px-2 py-1 rounded text-sm shrink-0"
@@ -348,11 +360,17 @@ export default function App() {
                             fontWeight: 500
                           }}
                         >
-                          {item.category === 'filler' ? 'Filler word' : item.category === 'pacing' ? 'Pacing' : 'Eye contact'}
+                          {item.category === 'filler'
+                            ? 'Filler word'
+                            : item.category === 'pacing'
+                              ? 'Pacing'
+                              : item.category === 'eyecontact'
+                                ? 'Eye contact'
+                                : 'Engagement'}
                         </div>
                       </div>
                     </div>
-                    {i < feedbackItems.length - 1 && (
+                    {i < timelineRows.length - 1 && (
                       <div className="my-4 border-t" style={{ borderColor: 'rgba(26, 26, 26, 0.05)' }} />
                     )}
                   </div>
